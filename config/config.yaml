@@ -1,0 +1,82 @@
+# Global configuration
+# Paths resolve ${AIREADI_DATA_PATH} at runtime via dotenv
+
+version: 0.1
+
+data:
+  raw_path: "${AIREADI_DATA_PATH}/raw/"
+  processed_path: "${AIREADI_DATA_PATH}/processed/"
+  intermediates_path: "${AIREADI_DATA_PATH}/processed/intermediates/"
+  qc_reports_path: "${AIREADI_DATA_PATH}/processed/qc_reports/"
+  artifacts_path: "${AIREADI_DATA_PATH}/artifacts/"
+
+module1:
+  normalization: "standard_scaler"
+  missing_strategy: "drop"          # Options: drop | impute (TODO) | none
+  qc_thresholds:
+    wearable:
+      min_heart_rate_valid_hour_coverage: 0.70
+      stress_min: 0
+      stress_max: 100
+      oxygen_saturation_min: 50
+      oxygen_saturation_max: 100
+      heart_rate_min: 25
+      heart_rate_max: 250
+      respiratory_rate_min: 4
+      respiratory_rate_max: 60
+      physical_activity_min: 0
+      calories_min: 0
+      sleep_duration_min_hours: 0
+      sleep_duration_max_hours: 24
+      # TODO: add per-modality valid day/hour thresholds if needed
+    cgm:
+      glucose_min_mg_dl: 40
+      glucose_max_mg_dl: 400
+      min_wear_days: 7
+    environment:
+      pm1_min: 0
+      pm1_max: 65536
+      pm2_5_min: 0
+      pm2_5_max: 65536
+      pm4_min: 0
+      pm4_max: 65536
+      pm10_min: 0
+      pm10_max: 65536
+      humidity_min: 0
+      humidity_max: 100
+      temperature_min_c: -10
+      temperature_max_c: 50
+      voc_min: 0
+      voc_max: 500
+      nox_min: 0
+      nox_max: 500
+      light_min: 0.0
+      light_max: 1.0
+      min_valid_hours: 168           # 70% of 10-day window = 168 hours
+
+module2:
+  k_range: [3, 4, 5]
+  covariance_types: ["full", "diagonal", "tied"]
+  bootstrap_B: 1000
+  bootstrap_early_stop_threshold: 0.001
+  pca_variance_threshold: 0.88
+  random_seed: 42
+
+module3:
+  primary_model: "threshold"
+  severity_covariates: ["hba1c_stratum", "diabetes_stage", "site"]
+  hba1c_strata_boundaries:
+    well_controlled: 7.0
+    moderate: 9.0
+  primary_outcome: "glycemic_cv"
+  cv_clinical_threshold: 36.0
+  run_comparison_models: true
+  sampling:
+    draws: 2000
+    tune: 1000
+    chains: 4
+    target_accept: 0.9
+
+reporting:
+  figure_format: "pdf"
+  dpi: 300

@@ -1,0 +1,22 @@
+name: t2d-phenotyping
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - pyarrow
+  - scikit-learn
+  - pyyaml
+  - python-dotenv
+  - joblib
+  - umap-learn
+  - shap
+  - lightgbm
+  - xgboost
+  - pymc
+  - arviz
+  - statsmodels
+  - matplotlib
+  - seaborn
+  - pytest
