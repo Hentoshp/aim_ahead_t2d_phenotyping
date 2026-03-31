@@ -124,8 +124,28 @@ Each QC report captures:
 
 QC thresholds are fully defined in `config.yaml`.
 
-- **Wearable** (`wearable_features.py`) — participant-level median/IQR summaries plus valid-hour/valid-day coverage for: heart rate, oxygen saturation, physical activity, calories, respiratory rate, stress, and sleep. These feed `clustering_matrix.parquet`.
-- **Environment** (`environment_features.py`) — summary measures for PM1, PM2.5 (TODO: verify), PM4, PM10, humidity, temperature, VOC, NOx, and light channels, plus valid-hour coverage. These feed `clustering_matrix.parquet`.
+- **Wearable** (`wearable_features.py`) — participant-level summaries plus modality-level valid-hour coverage. These feed `clustering_matrix.parquet`. Per-feature summary strategy:
+  - `heart_rate` — median, IQR, resting HR (sleep-period median)
+  - `oxygen_saturation` — proportion of hours below 95%, IQR
+  - `physical_activity` — median, IQR
+  - `calories` — median, IQR (zero is valid per QC; non-wear filtered by HR coverage)
+  - `respiratory_rate` — median, IQR (note: sleep-period median may be stronger alternative — deferred pending distribution review)
+  - `sleep` — total sleep duration median + IQR, combined deep+REM duration median
+  - `stress` — median, IQR (note: structured missingness during exercise — active participants have fewer readings)
+- **Environment** (`environment_features.py`) — participant-level summaries plus modality-level valid-hour coverage. These feed `clustering_matrix.parquet`. Per-feature summary strategy:
+  - `pm1` — median, IQR
+  - `pm2_5` — median, IQR (TODO: verify availability in raw sensor data)
+  - `pm10` — median, IQR
+  - `humidity` — median, IQR (note: expected correlation with temperature)
+  - `temperature` — median, IQR (note: expected correlation with humidity)
+  - `voc` — median, IQR, proportion of hours above 150 (meaningful elevation above adaptive baseline)
+  - `nox` — proportion of hours above 20 (meaningful elevation per sensor documentation); no median retained
+  - `light_total` — total intensity median (sum of lch0–lch11), proportion of hours above data-derived threshold (inspect distribution to define)
+
+**Dropped features:**
+  - `pm4` — estimated from PM1/PM2.5 by sensor algorithm, not independently measured; redundant with PM1 and PM2.5
+  - `lch0–lch11` — 12 individual spectral channels collapsed into `light_total`; individual channels highly correlated and non-interpretable for lifestyle clustering
+  - `screen` — not used as a feature
 - **CGM** (`cgm_features.py`) — computes finished outcome features directly from valid glucose observations; no median/IQR. Outputs:
   - `glycemic_cv` (PRIMARY) — (SD / mean) × 100 over valid observations
   - `mean_glucose` — falls out of CV calculation at no extra cost, retained for reporting
@@ -142,6 +162,7 @@ QC thresholds are fully defined in `config.yaml`.
   - **`clustering_matrix.parquet`** — wearable + environmental features only, normalized. This is the only artifact Module 2 consumes. CGM and clinical variables are explicitly excluded. Rows with missing values are dropped when `module1.missing_strategy: drop`.
   - **`outcome_matrix.parquet`** — CGM-derived glycemic features + clinical variables (HbA1c stratum, diabetes stage), not normalized. Consumed directly by Module 3. Never touches Module 2.
 - Normalization applied to `clustering_matrix` only — outcome variables remain in natural units for interpretability
+- Log transforms: `log1p` applied pre-normalization to right-skewed clustering features (calories, respiratory_rate, sleep_total*, pm1/pm2.5/pm10, light_total); proportion features are left as-is.
 - Stage balance audit written to `assemble_balance.json`; warns if any stage loses >20% of participants across assembly
 
 ### Exploration Script (`explore.py`)
@@ -152,6 +173,7 @@ Checks:
 2. **Per-feature skewness** — flags features with |skewness| > 2 as candidates for log-transform or rank-normalization
 3. **Missingness rate** — flags any feature with > 5% missing values after inner join
 4. **Near-zero variance** — flags features with variance < 0.01 post-normalization
+5. **Correlation matrix** — flags feature pairs with |r| > 0.85 as potentially redundant; informational only, no pipeline halt. Known expected correlations: stress/HR (HRV-derived overlap), humidity/temperature (physically coupled), NOx/VOC (combustion events), PM channels (cumulative nesting)
 
 Output:
 ```
@@ -163,6 +185,7 @@ ${AIREADI_DATA_PATH}/processed/exploration_report.json
       "skewed_features": [...],       # |skewness| > 2
       "high_missingness_features": [...],  # > 5% missing
       "low_variance_features": [...], # variance < 0.01
+      "high_correlation_pairs": [...],  # |r| > 0.85, informational only
       "created": timestamp
     }
 ```
@@ -255,20 +278,18 @@ module1:
       respiratory_rate_min: 4
       respiratory_rate_max: 60
       physical_activity_min: 0        # counts/movement quantity
-      calories_min: 1
+      calories_min: 0
       sleep_duration_min_hours: 0
       sleep_duration_max_hours: 24
     cgm:
       glucose_min_mg_dl: 40
       glucose_max_mg_dl: 400
-      # min wear days TBD — 10-day collection window, threshold to be confirmed
     environment:
       pm1_min: 0
       pm1_max: 65536
       pm2_5_min: 0                    # TODO: verify PM2.5 availability in raw sensor data
       pm2_5_max: 65536
-      pm4_min: 0
-      pm4_max: 65536
+      # pm4 dropped — estimated from PM1/PM2.5, not independently measured
       pm10_min: 0
       pm10_max: 65536
       humidity_min: 0
@@ -281,6 +302,10 @@ module1:
       nox_max: 500
       light_min: 0.0
       light_max: 1.0
+  environment_feature_summaries:
+    light_total_activity_threshold: null  # TBD — defined by distribution inspection of summed lch0-lch11
+    voc_elevation_threshold: 150          # meaningful elevation above adaptive baseline (index units)
+    nox_elevation_threshold: 20           # meaningful elevation per Sensirion documentation (index units)
   normalization: "standard_scaler"   # Applied in assemble.py after join
 
 module2:

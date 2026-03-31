@@ -24,10 +24,12 @@ HBA1C_SOURCE_VALUE = "import_hba1c, Hemoglobin A1c/Hemoglobin.total in "  # meas
 
 # Environment variables expected in config
 ENV_VALUE_COLS = [
-    "pm1", "pm2.5", "pm4", "pm10",
+    "pm1", "pm2.5", "pm10",
     "hum", "temp", "voc", "nox",
-    "lch0", "lch1", "lch2", "lch3", "lch6", "lch7", "lch8", "lch9", "lch10", "lch11",
 ]
+
+# Raw light spectral channels used to build light_total
+ENV_LIGHT_CHANNELS = ["lch0", "lch1", "lch2", "lch3", "lch6", "lch7", "lch8", "lch9", "lch10", "lch11"]
 
 SLEEP_INTERVAL_HOURS_MAX = 24
 
@@ -334,7 +336,15 @@ def pull_monitor_data(
     return feature_row
 
 
-def pull_environment_data(person_id: int, path: Path, prefix: str = "env", valid_ranges: dict | None = None, strict_missing: bool = False) -> pd.DataFrame:
+def pull_environment_data(
+    person_id: int,
+    path: Path,
+    prefix: str = "env",
+    valid_ranges: dict | None = None,
+    prop_thresholds: dict | None = None,
+    strict_missing: bool = False,
+    return_hourly: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.Series]:
     full_path = Path(path).expanduser()
     out = {"person_id": person_id}
     try:
@@ -342,24 +352,28 @@ def pull_environment_data(person_id: int, path: Path, prefix: str = "env", valid
     except FileNotFoundError:
         if strict_missing:
             raise
-        return pd.DataFrame([out])
+        return (pd.DataFrame([out]), pd.Series(dtype=float)) if return_hourly else pd.DataFrame([out])
 
     if df.empty or "ts" not in df.columns:
         if strict_missing:
             raise ValueError(f"Empty env data or missing ts column for person_id={person_id}: {path}")
-        return pd.DataFrame([out])
+        return (pd.DataFrame([out]), pd.Series(dtype=float)) if return_hourly else pd.DataFrame([out])
 
     ts = pd.to_datetime(df["ts"], errors="coerce", utc=True)
     df = df.assign(ts=ts).dropna(subset=["ts"])
     df["hour"] = df["ts"].dt.floor("h")
     out[f"{prefix}_valid_hours"] = int(df["hour"].nunique())
 
-    use_cols = [c for c in ENV_VALUE_COLS if c in df.columns]
+    if any(c in df.columns for c in ENV_LIGHT_CHANNELS):
+        df["light_total"] = df[[c for c in ENV_LIGHT_CHANNELS if c in df.columns]].sum(axis=1, min_count=1)
+
+    use_cols = [c for c in ENV_VALUE_COLS + ["light_total"] if c in df.columns]
     if not use_cols:
-        return pd.DataFrame([out])
+        return (pd.DataFrame([out]), pd.Series(dtype=float)) if return_hourly else pd.DataFrame([out])
 
     hourly = df.groupby("hour")[use_cols].median(numeric_only=True)
     valid_ranges = valid_ranges or {}
+    prop_thresholds = prop_thresholds or {}
 
     for c in use_cols:
         v = pd.to_numeric(hourly[c], errors="coerce")
@@ -372,4 +386,15 @@ def pull_environment_data(person_id: int, path: Path, prefix: str = "env", valid
         out[f"{prefix}_{c}_median"] = float(v.median()) if len(v) else None
         out[f"{prefix}_{c}_iqr"] = float(v.quantile(0.75) - v.quantile(0.25)) if len(v) else None
 
+        # Proportion above thresholds for selected channels
+        if c in ("voc", "nox", "light_total"):
+            thr = prop_thresholds.get(c)
+            if thr is not None and len(v):
+                out[f"{prefix}_{c}_prop_high"] = float((v > thr).mean())
+            else:
+                out[f"{prefix}_{c}_prop_high"] = None
+
+    if return_hourly:
+        light_hourly = hourly["light_total"] if "light_total" in hourly.columns else pd.Series(dtype=float)
+        return pd.DataFrame([out]), light_hourly
     return pd.DataFrame([out])

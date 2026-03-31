@@ -38,8 +38,6 @@ module1:
       pm1_max: 65536
       pm2_5_min: 0
       pm2_5_max: 65536
-      pm4_min: 0
-      pm4_max: 65536
       pm10_min: 0
       pm10_max: 65536
       humidity_min: 0
@@ -50,9 +48,11 @@ module1:
       voc_max: 500
       nox_min: 0
       nox_max: 500
-      light_min: 0.0
-      light_max: 1.0
       min_valid_hours: 168           # 70% of 10-day window = 168 hours
+  environment_feature_summaries:
+    voc_elevation_threshold: 150     # meaningful elevation above adaptive baseline (index units)
+    nox_elevation_threshold: 20      # meaningful elevation per Sensirion documentation (index units)
+    light_total_activity_threshold: 0     # any non-zero summed light counts as active
 
 module2:
   k_range: [3, 4, 5]

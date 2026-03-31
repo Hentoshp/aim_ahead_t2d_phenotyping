@@ -14,8 +14,8 @@ import joblib
 
 @dataclass
 class PCAResult:
-    transformed: np.ndarray
-    pca_model: any  # sklearn.decomposition.PCA at implementation time
+    transformed: pd.DataFrame
+    pca_model: PCA  # sklearn.decomposition.PCA
     explained_variance: float
 
 
@@ -23,6 +23,7 @@ def run_pca(
     matrix: pd.DataFrame,
     variance_threshold: float,
     random_state: int | None = None,
+    artifacts_path: Path | None = None,
 ) -> PCAResult:
     """Fit PCA to reach variance_threshold and return transformed data."""
 
@@ -39,6 +40,9 @@ def run_pca(
     if non_numeric:
         raise ValueError(f"All features must be numeric; non-numeric columns found: {non_numeric}")
 
+    if not np.isfinite(matrix.values).all():
+        raise ValueError("clustering_matrix contains non-finite values.")
+
     # Determine number of components to hit the variance threshold.
     pca_full = PCA(random_state=random_state, svd_solver="full")
     pca_full.fit(matrix.values)
@@ -46,17 +50,41 @@ def run_pca(
     n_components = int(np.searchsorted(cumvar, variance_threshold) + 1)
     n_components = min(n_components, matrix.shape[1])
 
+    # Optional cumulative variance plot
+    if artifacts_path is not None:
+        artifacts_path.mkdir(parents=True, exist_ok=True)
+        try:
+            import matplotlib.pyplot as plt  # local import to avoid hard dep during tests
+
+            plt.figure(figsize=(6, 4))
+            plt.plot(np.arange(1, len(cumvar) + 1), cumvar, marker="o", linewidth=1.2)
+            plt.axhline(variance_threshold, color="red", linestyle="--", linewidth=1, label=f"threshold={variance_threshold:.2f}")
+            plt.xlabel("Number of components")
+            plt.ylabel("Cumulative explained variance")
+            plt.ylim(0, 1.01)
+            plt.grid(True, alpha=0.3)
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(Path(artifacts_path) / "pca_cumulative_variance.png", dpi=150)
+            plt.close()
+        except ImportError:
+            pass
+
     pca = PCA(n_components=n_components, random_state=random_state, svd_solver="full")
-    transformed = pca.fit_transform(matrix.values)
+    transformed_arr = pca.fit_transform(matrix.values)
     explained = float(pca.explained_variance_ratio_.sum())
 
-    return PCAResult(transformed=transformed, pca_model=pca, explained_variance=explained)
+    pc_names = [f"PC{i+1}" for i in range(transformed_arr.shape[1])]
+    transformed_df = pd.DataFrame(transformed_arr, index=matrix.index, columns=pc_names)
+
+    return PCAResult(transformed=transformed_df, pca_model=pca, explained_variance=explained)
 
 
 def save_pca_artifacts(
     result: PCAResult,
     artifacts_path: Path,
     feature_names: list[str] | None = None,
+    save_transformed: bool = True,
 ) -> Path:
     """Persist PCA model and summary metadata. Returns path to saved model."""
 
@@ -64,6 +92,8 @@ def save_pca_artifacts(
 
     model_path = artifacts_path / "pca_model.joblib"
     summary_path = artifacts_path / "pca_summary.json"
+    transformed_path = artifacts_path / "pca_transformed.parquet"
+    loadings_path = artifacts_path / "pca_loadings.parquet"
 
     joblib.dump(result.pca_model, model_path)
 
@@ -86,5 +116,16 @@ def save_pca_artifacts(
     }
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
+
+    if save_transformed:
+        result.transformed.to_parquet(transformed_path)
+
+    # Component loadings: features x components
+    loadings = pd.DataFrame(
+        result.pca_model.components_.T,
+        index=feature_names or [f"feat_{i}" for i in range(result.pca_model.n_features_in_)],
+        columns=[f"PC{i+1}" for i in range(result.pca_model.n_components_)],
+    )
+    loadings.to_parquet(loadings_path)
 
     return model_path

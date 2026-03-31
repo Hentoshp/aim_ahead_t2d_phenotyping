@@ -2,17 +2,34 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import sys
 import pandas as pd
+import numpy as np
 
-from .common import (
-    load_config,
-    ensure_dirs,
-    load_participants,
-    json_to_df,
-    pull_monitor_data,
-    pull_sleep_data,
-    wear_minutes_from_heart_rate,
-)
+if __name__ == "__main__" and __package__ is None:
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+try:
+    from .common import (
+        load_config,
+        ensure_dirs,
+        load_participants,
+        json_to_df,
+        pull_monitor_data,
+        pull_sleep_data,
+        wear_minutes_from_heart_rate,
+    )
+except ImportError:
+    # Fallback when executed as a script (python module1_processing/wearable_features.py ...)
+    from module1_processing.common import (  # type: ignore
+        load_config,
+        ensure_dirs,
+        load_participants,
+        json_to_df,
+        pull_monitor_data,
+        pull_sleep_data,
+        wear_minutes_from_heart_rate,
+    )
 
 HR_PATH = "wearable_activity_monitor/heart_rate/garmin_vivosmart5/{pid}/{pid}_heartrate.json"
 O2_PATH = "wearable_activity_monitor/oxygen_saturation/garmin_vivosmart5/{pid}/{pid}_oxygensaturation.json"
@@ -21,6 +38,68 @@ CALORIES_PATH = "wearable_activity_monitor/physical_activity_calorie/garmin_vivo
 RESP_PATH = "wearable_activity_monitor/respiratory_rate/garmin_vivosmart5/{pid}/{pid}_respiratoryrate.json"
 STRESS_PATH = "wearable_activity_monitor/stress/garmin_vivosmart5/{pid}/{pid}_stress.json"
 SLEEP_PATH = "wearable_activity_monitor/sleep/garmin_vivosmart5/{pid}/{pid}_sleep.json"
+
+
+def _prop_below_threshold(df: pd.DataFrame, threshold: float, value_col: str, time_col: str, wear_minutes: pd.DatetimeIndex | None,
+                          min_value: float | None = None, max_value: float | None = None) -> float | None:
+    """Compute proportion of values below threshold after basic cleaning and wear filtering."""
+    if df is None or df.empty or threshold is None:
+        return None
+    ts = pd.to_datetime(df[time_col], errors="coerce", utc=True) if time_col in df.columns else pd.Series(dtype="datetime64[ns, UTC]")
+    v = pd.to_numeric(df[value_col], errors="coerce") if value_col in df.columns else pd.Series(dtype=float)
+    if wear_minutes is not None and len(wear_minutes) and not ts.empty:
+        keep = ts.dt.floor("min").isin(wear_minutes)
+        ts = ts.loc[keep]
+        v = v.loc[keep]
+    if min_value is not None:
+        v = v.mask(v < min_value)
+    if max_value is not None:
+        v = v.mask(v > max_value)
+    v = v.dropna()
+    if v.empty:
+        return None
+    return float((v < threshold).mean())
+
+
+def _resting_hr_sleep_median(
+    hr_df: pd.DataFrame,
+    sleep_df: pd.DataFrame,
+    hr_col: str,
+    hr_min: float,
+    hr_max: float,
+    hr_time_col: str,
+    sleep_start_col: str,
+    sleep_end_col: str,
+) -> float | None:
+    """Median heart rate during sleep intervals; None if no overlap."""
+    if hr_df is None or sleep_df is None or hr_df.empty or sleep_df.empty:
+        return None
+    if hr_time_col not in hr_df.columns or hr_col not in hr_df.columns:
+        return None
+    if sleep_start_col not in sleep_df.columns or sleep_end_col not in sleep_df.columns:
+        return None
+
+    hr_ts = pd.to_datetime(hr_df[hr_time_col], errors="coerce", utc=True)
+    hr_vals = pd.to_numeric(hr_df[hr_col], errors="coerce")
+    keep_hr = hr_vals.between(hr_min, hr_max) & hr_ts.notna()
+    hr_ts = hr_ts[keep_hr]
+    hr_vals = hr_vals[keep_hr]
+    if hr_ts.empty:
+        return None
+
+    sleep_start = pd.to_datetime(sleep_df[sleep_start_col], errors="coerce", utc=True)
+    sleep_end = pd.to_datetime(sleep_df[sleep_end_col], errors="coerce", utc=True)
+    mask = np.zeros(len(hr_ts), dtype=bool)
+    for s, e in zip(sleep_start, sleep_end):
+        if pd.isna(s) or pd.isna(e):
+            continue
+        mask |= hr_ts.between(s, e, inclusive="both").to_numpy()
+
+    vals = hr_vals[mask]
+    vals = pd.to_numeric(vals, errors="coerce").dropna()
+    if vals.empty:
+        return None
+    return float(vals.median())
 
 
 def build_wearable_features(cfg_path: Path) -> None:
@@ -114,6 +193,26 @@ def build_wearable_features(cfg_path: Path) -> None:
                     strict_missing=False,
                 )
 
+            # Raw SpO2 for proportion below 95%
+            o2_prop_low = None
+            try:
+                o2_raw = json_to_df(raw_path / O2_PATH.format(pid=pid), strict_missing=True)
+                o2_prop_low = _prop_below_threshold(
+                    o2_raw,
+                    threshold=95,
+                    value_col="oxygen_saturation.value",
+                    time_col="effective_time_frame.date_time",
+                    wear_minutes=wear_mins,
+                    min_value=thresholds.get("oxygen_saturation_min"),
+                    max_value=thresholds.get("oxygen_saturation_max"),
+                )
+            except FileNotFoundError:
+                record_reason("missing_file_oxygen_sat")
+            except ValueError:
+                record_reason("value_error_oxygen_sat")
+            except Exception:
+                record_reason("other_error_oxygen_sat")
+
             o2_features = safe_monitor(
                 O2_PATH, "oxygen_sat", value_col="oxygen_saturation.value",
                 time_col="effective_time_frame.date_time",
@@ -150,8 +249,20 @@ def build_wearable_features(cfg_path: Path) -> None:
                 max_value=thresholds.get("stress_max"),
             )
 
+            resting_hr = None
             try:
                 sleep_path = raw_path / SLEEP_PATH.format(pid=pid)
+                sleep_raw = json_to_df(sleep_path, strict_missing=True)
+                resting_hr = _resting_hr_sleep_median(
+                    hr_df=hr_df,
+                    sleep_df=sleep_raw,
+                    hr_col="heart_rate.value",
+                    hr_min=thresholds.get("heart_rate_min", 25),
+                    hr_max=thresholds.get("heart_rate_max", 250),
+                    hr_time_col="effective_time_frame.date_time",
+                    sleep_start_col="effective_time_frame.time_interval.start_date_time",
+                    sleep_end_col="effective_time_frame.time_interval.end_date_time",
+                )
                 sleep_features = pull_sleep_data(
                     pid,
                     sleep_path,
@@ -205,6 +316,8 @@ def build_wearable_features(cfg_path: Path) -> None:
             merged = merged.merge(resp_features, on="person_id", how="left")
             merged = merged.merge(stress_features, on="person_id", how="left")
             merged = merged.merge(sleep_features, on="person_id", how="left")
+            merged["heart_rate_resting_median"] = resting_hr
+            merged["oxygen_sat_prop_below_95"] = o2_prop_low
             rows.append(merged)
 
         except FileNotFoundError as e:

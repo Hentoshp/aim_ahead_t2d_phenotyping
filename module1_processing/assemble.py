@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import json
 import pandas as pd
+import numpy as np
 from sklearn.preprocessing import StandardScaler
 
 from .common import load_config, ensure_dirs
@@ -74,6 +75,24 @@ def assemble(cfg_path: Path) -> None:
 
     clustering_df = joined[clustering_cols]
     outcome_df = joined[outcome_cols]
+
+    # Right-skewed features → log1p transform before normalization
+    skew_prefixes = (
+        "calories_",
+        "respiratory_rate_",
+        "env_pm1_",
+        "env_pm2.5_",
+        "env_pm10_",
+        "env_light_total_",
+    )
+    skew_contains = ("sleep_total",)
+    skew_cols = [
+        c for c in clustering_df.columns
+        if (c.startswith(skew_prefixes) or any(s in c for s in skew_contains))
+        and not c.endswith("_prop_high")
+    ]
+    for col in skew_cols:
+        clustering_df[col] = np.log1p(clustering_df[col].clip(lower=0))
 
     # Handle missing values before normalization/clustering
     missing_strategy = cfg["module1"].get("missing_strategy", "drop")
