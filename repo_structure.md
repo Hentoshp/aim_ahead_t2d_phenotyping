@@ -130,12 +130,10 @@ QC thresholds are fully defined in `config.yaml`.
   - `physical_activity` — median, IQR
   - `calories` — median, IQR (zero is valid per QC; non-wear filtered by HR coverage)
   - `respiratory_rate` — median, IQR (note: sleep-period median may be stronger alternative — deferred pending distribution review)
-  - `sleep` — total sleep duration median + IQR, combined deep+REM duration median
+  - `sleep` — total sleep duration median + IQR, combined deep+REM duration median (no per-stage medians/IQRs)
   - `stress` — median, IQR (note: structured missingness during exercise — active participants have fewer readings)
 - **Environment** (`environment_features.py`) — participant-level summaries plus modality-level valid-hour coverage. These feed `clustering_matrix.parquet`. Per-feature summary strategy:
-  - `pm1` — median, IQR
-  - `pm2_5` — median, IQR (TODO: verify availability in raw sensor data)
-  - `pm10` — median, IQR
+  - `pm10` — median, IQR (pm1/pm2.5 dropped as redundant with pm10)
   - `humidity` — median, IQR (note: expected correlation with temperature)
   - `temperature` — median, IQR (note: expected correlation with humidity)
   - `voc` — median, IQR, proportion of hours above 150 (meaningful elevation above adaptive baseline)
@@ -237,8 +235,20 @@ ${AIREADI_DATA_PATH}/artifacts/bootstrap_report.json
       "cluster_pvalues": [...]
     }
 
+${AIREADI_DATA_PATH}/artifacts/gmm_bic_curve.png    # Best BIC per K (diagnostic)
+${AIREADI_DATA_PATH}/artifacts/membership_diagnostics.json
+    {
+      "prop_high_confidence": float,   # share with max prob > 0.7
+      "mean_entropy": float,
+      "max_entropy": float,
+      "bootstrap_ari_std": float | null,
+      "flags": [ ... ]                 # warnings when thresholds triggered
+    }
+
 ${AIREADI_DATA_PATH}/artifacts/shap_distributions.parquet
-    - Mean SHAP ± 95% CI per feature per cluster across bootstrap resamples
+    - Mean ± 95% CI of |SHAP| per feature per cluster aggregated across bootstrap resamples (SHAP computed inside bootstrap loop)
+${AIREADI_DATA_PATH}/artifacts/shap_report.json
+    - Resamples with SHAP and top 5 features per cluster with |SHAP| mean and 95% CI (present only when SHAP available)
 ```
 
 ### Module 3 → Module 4

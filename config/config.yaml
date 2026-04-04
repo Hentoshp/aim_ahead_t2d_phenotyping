@@ -55,11 +55,16 @@ module1:
     light_total_activity_threshold: 0     # any non-zero summed light counts as active
 
 module2:
-  k_range: [3, 4, 5]
-  covariance_types: ["full", "diagonal", "tied"]
+  k_range: [3, 4]
+  covariance_types: ["diagonal", "tied"]
   bootstrap_B: 1000
   bootstrap_early_stop_threshold: 0.001
-  pca_variance_threshold: 0.88
+  pca_variance_threshold: 0.75
+  pca_mode: "variance"          # options: variance | fixed
+  pca_n_components: null        # used when pca_mode == fixed
+  corr_prune: true
+  corr_threshold: 0.9
+  gmm_reg_covar: 0.001
   random_seed: 42
 
 module3:

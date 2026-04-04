@@ -8,8 +8,22 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sklearn.decomposition import PCA
 import joblib
+from sklearn.decomposition import PCA
+
+
+def correlation_filter(df: pd.DataFrame, threshold: float = 0.9, method: str = "pearson") -> tuple[pd.DataFrame, list[str]]:
+    """Drop columns with |r| > threshold, keeping the first occurrence."""
+    if threshold <= 0 or threshold >= 1:
+        raise ValueError("threshold must be in (0, 1)")
+    if df.empty:
+        return df.copy(), []
+
+    corr = df.corr(method=method).abs()
+    upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+    to_drop: list[str] = [col for col in upper.columns if any(upper[col] > threshold)]
+    filtered = df.drop(columns=to_drop)
+    return filtered, to_drop
 
 
 @dataclass
@@ -17,18 +31,18 @@ class PCAResult:
     transformed: pd.DataFrame
     pca_model: PCA  # sklearn.decomposition.PCA
     explained_variance: float
+    n_components: int
 
 
 def run_pca(
     matrix: pd.DataFrame,
-    variance_threshold: float,
+    variance_threshold: float | None,
     random_state: int | None = None,
     artifacts_path: Path | None = None,
+    mode: str = "variance",
+    n_components: int | None = None,
 ) -> PCAResult:
-    """Fit PCA to reach variance_threshold and return transformed data."""
-
-    if not 0 < variance_threshold <= 1:
-        raise ValueError("variance_threshold must be in (0, 1].")
+    """Fit PCA either to a variance threshold or fixed n_components."""
 
     if not isinstance(matrix, pd.DataFrame):
         raise TypeError("matrix must be a pandas DataFrame.")
@@ -43,22 +57,39 @@ def run_pca(
     if not np.isfinite(matrix.values).all():
         raise ValueError("clustering_matrix contains non-finite values.")
 
-    # Determine number of components to hit the variance threshold.
-    pca_full = PCA(random_state=random_state, svd_solver="full")
-    pca_full.fit(matrix.values)
-    cumvar = np.cumsum(pca_full.explained_variance_ratio_)
-    n_components = int(np.searchsorted(cumvar, variance_threshold) + 1)
-    n_components = min(n_components, matrix.shape[1])
+    if mode not in ("variance", "fixed"):
+        raise ValueError("mode must be 'variance' or 'fixed'.")
 
-    # Optional cumulative variance plot
+    if mode == "variance":
+        if variance_threshold is None or not 0 < variance_threshold <= 1:
+            raise ValueError("variance_threshold must be in (0, 1] when mode=='variance'.")
+
+        pca_full = PCA(random_state=random_state, svd_solver="full")
+        pca_full.fit(matrix.values)
+        cumvar = np.cumsum(pca_full.explained_variance_ratio_)
+        n_components_calc = int(np.searchsorted(cumvar, variance_threshold) + 1)
+    else:
+        if n_components is None or n_components < 1:
+            raise ValueError("n_components must be provided and >=1 when mode=='fixed'.")
+        n_components_calc = int(n_components)
+
+    n_components_final = max(1, min(n_components_calc, matrix.shape[1]))
+
+    pca = PCA(n_components=n_components_final, random_state=random_state, svd_solver="full")
+    transformed_arr = pca.fit_transform(matrix.values)
+    explained = float(pca.explained_variance_ratio_.sum())
+
+    # Optional cumulative variance plot (post-fit to avoid duplicated work)
     if artifacts_path is not None:
         artifacts_path.mkdir(parents=True, exist_ok=True)
         try:
             import matplotlib.pyplot as plt  # local import to avoid hard dep during tests
 
+            cumvar_plot = np.cumsum(pca.explained_variance_ratio_)
             plt.figure(figsize=(6, 4))
-            plt.plot(np.arange(1, len(cumvar) + 1), cumvar, marker="o", linewidth=1.2)
-            plt.axhline(variance_threshold, color="red", linestyle="--", linewidth=1, label=f"threshold={variance_threshold:.2f}")
+            plt.plot(np.arange(1, len(cumvar_plot) + 1), cumvar_plot, marker="o", linewidth=1.2)
+            if variance_threshold is not None:
+                plt.axhline(variance_threshold, color="red", linestyle="--", linewidth=1, label=f"threshold={variance_threshold:.2f}")
             plt.xlabel("Number of components")
             plt.ylabel("Cumulative explained variance")
             plt.ylim(0, 1.01)
@@ -70,14 +101,15 @@ def run_pca(
         except ImportError:
             pass
 
-    pca = PCA(n_components=n_components, random_state=random_state, svd_solver="full")
-    transformed_arr = pca.fit_transform(matrix.values)
-    explained = float(pca.explained_variance_ratio_.sum())
-
     pc_names = [f"PC{i+1}" for i in range(transformed_arr.shape[1])]
     transformed_df = pd.DataFrame(transformed_arr, index=matrix.index, columns=pc_names)
 
-    return PCAResult(transformed=transformed_df, pca_model=pca, explained_variance=explained)
+    return PCAResult(
+        transformed=transformed_df,
+        pca_model=pca,
+        explained_variance=explained,
+        n_components=n_components_final,
+    )
 
 
 def save_pca_artifacts(
@@ -85,6 +117,9 @@ def save_pca_artifacts(
     artifacts_path: Path,
     feature_names: list[str] | None = None,
     save_transformed: bool = True,
+    mode: str = "variance",
+    variance_threshold: float | None = None,
+    n_components_requested: int | None = None,
 ) -> Path:
     """Persist PCA model and summary metadata. Returns path to saved model."""
 
@@ -112,6 +147,9 @@ def save_pca_artifacts(
         "random_state": rs_serializable,
         "svd_solver": result.pca_model.svd_solver,
         "feature_names": feature_names or [],
+        "mode": mode,
+        "variance_threshold": variance_threshold,
+        "n_components_requested": n_components_requested,
         "created": datetime.now(timezone.utc).isoformat(),
     }
     with open(summary_path, "w") as f:

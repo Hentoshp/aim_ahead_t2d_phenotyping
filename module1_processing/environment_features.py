@@ -97,8 +97,13 @@ def build_environment_features(cfg_path: Path) -> None:
         raise ValueError("Environment features empty; check input files and thresholds")
 
     features = features.set_index("person_id")
-    # Drop nox median/iqr per updated feature list (keep prop_high)
-    drop_cols = [c for c in features.columns if c.startswith("env_nox_") and (c.endswith("_median") or c.endswith("_iqr"))]
+    # Drop redundant pollutant summaries (keep only pm10 median/iqr) and nox median/iqr
+    drop_cols = [
+        c
+        for c in features.columns
+        if (c.startswith("env_pm1_") or c.startswith("env_pm2.5_") or c.startswith("env_nox_"))
+        and (c.endswith("_median") or c.endswith("_iqr"))
+    ]
     features = features.drop(columns=drop_cols, errors="ignore")
     features.to_parquet(inter_dir / "environment_features.parquet")
 

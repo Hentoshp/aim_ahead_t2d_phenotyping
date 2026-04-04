@@ -218,11 +218,14 @@ def pull_sleep_data(
     out[f"{prefix}_total_median_hr"] = float(total.median()) if len(total) else None
     out[f"{prefix}_total_iqr_hr"] = float(total.quantile(0.75) - total.quantile(0.25)) if len(total) else None
 
-    for s in daily_stage.columns:
-        stage_vals = pd.to_numeric(daily_stage[s], errors="coerce")
-        stage_vals = stage_vals[np.isfinite(stage_vals)].dropna()
-        out[f"{prefix}_{s}_median_hr"] = float(stage_vals.median()) if len(stage_vals) else None
-        out[f"{prefix}_{s}_iqr_hr"] = float(stage_vals.quantile(0.75) - stage_vals.quantile(0.25)) if len(stage_vals) else None
+    # Combine deep + REM durations (per day), keep median only
+    deep = pd.to_numeric(daily_stage.get("deep", pd.Series(dtype=float)), errors="coerce")
+    rem = pd.to_numeric(daily_stage.get("rem", pd.Series(dtype=float)), errors="coerce")
+    deep = deep[np.isfinite(deep)].fillna(0)
+    rem = rem[np.isfinite(rem)].fillna(0)
+    deep_rem = deep.add(rem, fill_value=0)
+    deep_rem = deep_rem[np.isfinite(deep_rem)].dropna()
+    out[f"{prefix}_deep_rem_median_hr"] = float(deep_rem.median()) if len(deep_rem) else None
 
     return pd.DataFrame([out])
 
