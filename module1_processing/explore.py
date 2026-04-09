@@ -77,11 +77,17 @@ def plot_skewed_histograms(df: pd.DataFrame, skewed_features: list[str], out_dir
     return saved
 
 
-def run(cfg_path: Path) -> None:
+def run(cfg_path: Path, view: str | None = None) -> None:
     cfg, base = load_config(cfg_path)
     processed_path = Path(cfg["data"]["processed_path"].replace("${AIREADI_DATA_PATH}", str(base)))
-    clustering_path = processed_path / "clustering_matrix.parquet"
-    raw_path = processed_path / "clustering_matrix_raw.parquet"
+    default_view = cfg.get("module1", {}).get("clustering_views", {}).get("default_view", "wearable_environment")
+    target_view = view or default_view
+
+    view_dir = processed_path / "clustering_views" / target_view
+    clustering_path = view_dir / "clustering_matrix.parquet"
+    raw_path = view_dir / "clustering_matrix_raw.parquet"
+    out_dir = view_dir
+
     if not clustering_path.exists():
         raise FileNotFoundError(f"Missing clustering matrix: {clustering_path}")
 
@@ -113,10 +119,11 @@ def run(cfg_path: Path) -> None:
     kmo_overall, chi2_val, p_val, df_bart = kmo_bartlett(clean_df)
     pca_fit_passed = (kmo_overall > 0.6) and (p_val < 0.05)
 
-    hist_dir = processed_path / "exploration_histograms"
+    hist_dir = out_dir / "exploration_histograms"
     histogram_paths = plot_skewed_histograms(raw_clean_df, skewed, hist_dir)
 
     report = {
+        "view_name": target_view,
         "kmo_score": float(kmo_overall),
         "bartlett_chi2": float(chi2_val),
         "bartlett_df": df_bart,
@@ -131,7 +138,7 @@ def run(cfg_path: Path) -> None:
         "created": pd.Timestamp.utcnow().isoformat(),
     }
 
-    out_path = processed_path / "exploration_report.json"
+    out_path = out_dir / "exploration_report.json"
     out_path.write_text(json.dumps(report, indent=2))
 
     # Console warnings
@@ -153,8 +160,9 @@ def run(cfg_path: Path) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Clustering matrix exploration diagnostics")
     parser.add_argument("--config", required=True, help="Path to config.yaml")
+    parser.add_argument("--view", default=None, help="Optional clustering view name")
     args = parser.parse_args()
-    run(Path(args.config))
+    run(Path(args.config), view=args.view)
 
 
 if __name__ == "__main__":

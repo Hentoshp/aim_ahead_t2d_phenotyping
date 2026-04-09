@@ -41,6 +41,7 @@ def run_pca(
     artifacts_path: Path | None = None,
     mode: str = "variance",
     n_components: int | None = None,
+    save_plot: bool = False,
 ) -> PCAResult:
     """Fit PCA either to a variance threshold or fixed n_components."""
 
@@ -80,7 +81,7 @@ def run_pca(
     explained = float(pca.explained_variance_ratio_.sum())
 
     # Optional cumulative variance plot (post-fit to avoid duplicated work)
-    if artifacts_path is not None:
+    if artifacts_path is not None and save_plot:
         artifacts_path.mkdir(parents=True, exist_ok=True)
         try:
             import matplotlib.pyplot as plt  # local import to avoid hard dep during tests
@@ -116,7 +117,9 @@ def save_pca_artifacts(
     result: PCAResult,
     artifacts_path: Path,
     feature_names: list[str] | None = None,
-    save_transformed: bool = True,
+    save_summary: bool = True,
+    save_transformed: bool = False,
+    save_loadings: bool = False,
     mode: str = "variance",
     variance_threshold: float | None = None,
     n_components_requested: int | None = None,
@@ -126,7 +129,6 @@ def save_pca_artifacts(
     artifacts_path.mkdir(parents=True, exist_ok=True)
 
     model_path = artifacts_path / "pca_model.joblib"
-    summary_path = artifacts_path / "pca_summary.json"
     transformed_path = artifacts_path / "pca_transformed.parquet"
     loadings_path = artifacts_path / "pca_loadings.parquet"
 
@@ -152,18 +154,20 @@ def save_pca_artifacts(
         "n_components_requested": n_components_requested,
         "created": datetime.now(timezone.utc).isoformat(),
     }
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
+    if save_summary:
+        summary_path = artifacts_path / "pca_summary.json"
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2)
 
     if save_transformed:
         result.transformed.to_parquet(transformed_path)
 
-    # Component loadings: features x components
-    loadings = pd.DataFrame(
-        result.pca_model.components_.T,
-        index=feature_names or [f"feat_{i}" for i in range(result.pca_model.n_features_in_)],
-        columns=[f"PC{i+1}" for i in range(result.pca_model.n_components_)],
-    )
-    loadings.to_parquet(loadings_path)
+    if save_loadings:
+        loadings = pd.DataFrame(
+            result.pca_model.components_.T,
+            index=feature_names or [f"feat_{i}" for i in range(result.pca_model.n_features_in_)],
+            columns=[f"PC{i+1}" for i in range(result.pca_model.n_components_)],
+        )
+        loadings.to_parquet(loadings_path)
 
     return model_path

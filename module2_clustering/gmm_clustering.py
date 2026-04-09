@@ -12,6 +12,14 @@ import math
 import matplotlib.pyplot as plt
 
 
+def _normalize_covariance_type(covariance_type: str) -> str:
+    aliases = {
+        "diagonal": "diag",
+    }
+    cov = str(covariance_type).strip().lower()
+    return aliases.get(cov, cov)
+
+
 @dataclass
 class GMMFit:
     model: GaussianMixture
@@ -49,10 +57,11 @@ def grid_search_gmm(
         if k < 1:
             continue
         for cov in covariance_types:
+            cov_norm = _normalize_covariance_type(cov)
             try:
                 gmm = GaussianMixture(
                     n_components=int(k),
-                    covariance_type=str(cov),
+                    covariance_type=cov_norm,
                     random_state=random_state,
                     reg_covar=reg_covar,
                     max_iter=500,
@@ -61,8 +70,8 @@ def grid_search_gmm(
                 bic = gmm.bic(X)
                 aic = gmm.aic(X)
                 ll = float(gmm.score(X) * len(X))  # total log-likelihood
-                fit = GMMFit(model=gmm, k=int(k), covariance_type=str(cov), bic=float(bic), aic=float(aic), log_likelihood=ll)
-                records.append({"k": int(k), "covariance_type": str(cov), "bic": float(bic), "aic": float(aic), "log_likelihood": ll})
+                fit = GMMFit(model=gmm, k=int(k), covariance_type=cov_norm, bic=float(bic), aic=float(aic), log_likelihood=ll)
+                records.append({"k": int(k), "covariance_type": cov_norm, "bic": float(bic), "aic": float(aic), "log_likelihood": ll})
 
                 if best is None:
                     best = fit

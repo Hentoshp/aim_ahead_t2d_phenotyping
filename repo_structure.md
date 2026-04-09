@@ -31,45 +31,58 @@ ${AIREADI_DATA_PATH}/
 │   │   ├── cgm_qc.json
 │   │   ├── environment_qc.json
 │   │   └── clinical_qc.json
-│   ├── clustering_matrix.parquet    # Wearable + environment only → Module 2
-│   └── outcome_matrix.parquet       # CGM + clinical vars → Module 3 directly
+│   ├── clustering_views/
+│   │   ├── wearable/
+│   │   │   ├── clustering_matrix.parquet
+│   │   │   ├── clustering_matrix_raw.parquet
+│   │   │   └── clustering_matrix_meta.json
+│   │   ├── environment/
+│   │   └── wearable_environment/
+│   ├── outcome_matrix.parquet       # CGM + clinical vars → Module 3 directly
+│   ├── outcome_matrix_meta.json
+│   ├── assemble_balance.json
+│   └── clustering_matrix*.parquet    # Optional root default-view aliases in debug / compatibility mode
 └── artifacts/                       # Module 2+ outputs
+    └── module2/
+        ├── experiment_comparison.csv
+        ├── selection_summary.csv
+        ├── wearable/
+        ├── environment/
+        └── wearable_environment/
 
 # Repo root — agent scope limited to here
 project_root/
 │
+├── data_processing.py              # Legacy standalone processing script; not part of current modular pipeline
 ├── config/
 │   └── config.yaml                  # All parameters — data paths reference ${AIREADI_DATA_PATH}
 │
 ├── module1_processing/
+│   ├── common.py                    # Shared loaders, JSON/CSV wrappers, feature pull helpers
 │   ├── wearable_features.py         # Extract wearable features → intermediate
 │   ├── cgm_features.py              # Extract CGM features → intermediate
 │   ├── environment_features.py      # Extract environment features → intermediate
 │   ├── clinical_features.py         # Extract clinical vars (HbA1c, diabetes stage, site) → intermediate
 │   ├── assemble.py                  # Inner join intermediates → clustering_matrix + outcome_matrix
-│   ├── explore.py                   # PCA fitness checks on clustering_matrix — runs after assemble
+│   ├── explore.py                   # PCA fitness checks on a clustering view — runs after assemble
 │   └── pipeline.py                  # Orchestrates module 1 end-to-end
 │
 ├── module2_clustering/
+│   ├── utils.py
 │   ├── dimensionality_reduction.py
 │   ├── gmm_clustering.py
 │   ├── bootstrap.py                 # Bootstrap loop + early stopping logic
 │   ├── shap_importance.py           # SHAP computation inside bootstrap
 │   ├── cluster_profiling.py         # Back-projection, radar plots, profile tables
+│   ├── diagnostics.py               # Standalone PCA/GMM diagnostic sweep
+│   ├── experiment_runner.py         # Runs view x config experiments and writes comparison tables
 │   └── pipeline.py
 │
 ├── module3_bayesian/
-│   ├── threshold_model.py           # PRIMARY — Bayesian threshold model: P(CV<36% | HbA1c stratum, cluster)
-│   ├── residualization.py           # COMPARISON — Stage 1 regression for two-stage model
-│   ├── two_stage_model.py           # COMPARISON — two-stage Bayesian model
-│   ├── joint_model.py               # COMPARISON — unified single posterior
-│   ├── salutogenic_analysis.py      # Exceedance curves, stochastic dominance
-│   └── pipeline.py
+│   └── pipeline.py                  # Stub — validates config path then raises NotImplementedError
 │
 ├── module4_reporting/
-│   ├── figures.py                   # All figure generation
-│   ├── tables.py                    # Summary and demographic tables
-│   └── pipeline.py
+│   └── pipeline.py                  # Stub — validates config path then raises NotImplementedError
 │
 ├── tests/
 │   ├── test_module1.py
@@ -78,14 +91,10 @@ project_root/
 │
 ├── runs/                            # Experiment tracking — one folder per run
 │   └── run_YYYYMMDD_HHMMSS/
-│       ├── config_snapshot.yaml     # Exact config used
-│       ├── logs/
-│       └── outputs/
+│       └── config_snapshot.yaml     # Exact config used (Module 1 pipeline)
 │
-├── environment.yml                  # Conda lockfile
-├── .env                             # Gitignored — AIREADI_DATA_PATH defined here
-├── .env.example                     # Committed — template showing required variables, no values
-└── README.md
+├── environment.yml                  # Conda environment definition
+└── .env                             # Gitignored — AIREADI_DATA_PATH defined here locally
 ```
 
 ---
@@ -155,16 +164,19 @@ QC thresholds are fully defined in `config.yaml`.
 - Reads all modality intermediates
 - **Inner join on participant_id** — only participants present in all modalities and passing QC are retained
 - Logs final n after join with breakdown of who was dropped at which modality
-- Missing handling: wearable/env missing values are allowed initially; `module1.missing_strategy` controls handling before clustering (default `drop` removes any row with NaNs from clustering/outcome matrices)
-- Produces two strictly separated output artifacts:
-  - **`clustering_matrix.parquet`** — wearable + environmental features only, normalized. This is the only artifact Module 2 consumes. CGM and clinical variables are explicitly excluded. Rows with missing values are dropped when `module1.missing_strategy: drop`.
+- Missing handling: wearable/env missing values are allowed initially; `module1.missing_strategy` controls handling before clustering (default `drop` removes any row with NaNs from the common clustering cohort and aligned outcome matrix)
+- Builds named clustering views on the same common cohort, driven by `module1.clustering_views` in `config.yaml`
+- Produces two strictly separated output artifact families:
+  - **`processed/clustering_views/<view>/clustering_matrix.parquet`** — normalized clustering input for a named view (`wearable`, `environment`, `wearable_environment`). CGM and clinical variables are explicitly excluded.
+  - **`processed/clustering_views/<view>/clustering_matrix_meta.json`** — view-level metadata and artifact policy.
   - **`outcome_matrix.parquet`** — CGM-derived glycemic features + clinical variables (HbA1c stratum, diabetes stage), not normalized. Consumed directly by Module 3. Never touches Module 2.
+  - **Optional compatibility aliases** — `processed/clustering_matrix*.{parquet,json}` and `processed/clustering_matrix_common_raw.parquet` are written only when `module1.artifacts.write_default_aliases` / debug outputs are enabled.
 - Normalization applied to `clustering_matrix` only — outcome variables remain in natural units for interpretability
-- Log transforms: `log1p` applied pre-normalization to right-skewed clustering features (calories, respiratory_rate, sleep_total*, pm1/pm2.5/pm10, light_total); proportion features are left as-is.
+- Log transforms: `log1p` applied pre-normalization to right-skewed clustering features (calories, respiratory_rate, sleep_total*, pm10, light_total); proportion features are left as-is.
 - Stage balance audit written to `assemble_balance.json`; warns if any stage loses >20% of participants across assembly
 
 ### Exploration Script (`explore.py`)
-Runs after `assemble.py` on `clustering_matrix.parquet`. Purely diagnostic — produces no artifacts consumed downstream.
+Runs after `assemble.py` on the configured default view by default, or on a named view via `--view`. Purely diagnostic — produces no artifacts consumed downstream.
 
 Checks:
 1. **KMO + Bartlett's test** — KMO > 0.6 and Bartlett p < 0.05 required; pipeline halts with error if either fails
@@ -175,7 +187,8 @@ Checks:
 
 Output:
 ```
-${AIREADI_DATA_PATH}/processed/exploration_report.json
+${AIREADI_DATA_PATH}/processed/clustering_views/<view>/exploration_report.json
+    - Written for the selected view (including the default view when no `--view` is passed)
     {
       "kmo_score": float,
       "bartlett_p": float,
@@ -190,17 +203,21 @@ ${AIREADI_DATA_PATH}/processed/exploration_report.json
 
 ### Module 1 → Module 2
 ```
-${AIREADI_DATA_PATH}/processed/clustering_matrix.parquet
+${AIREADI_DATA_PATH}/processed/clustering_views/<view>/clustering_matrix.parquet
     - Index: participant_id
-    - Columns: wearable + environmental features ONLY, normalized
+    - Columns: view-specific wearable/environment features ONLY, normalized
     - No CGM or clinical variables
     - No nulls
+    - Shared common cohort across all views
     - Metadata sidecar: clustering_matrix_meta.json
         {
+          "view_name": str,
+          "cohort_policy": "common",
           "n_participants": int,
           "n_features": int,
-          "modalities": ["wearable", "environment"],
-          "normalization": "standard_scaler",
+          "feature_names": [...],
+          "modalities": [...],
+          "normalization": {...},
           "created": timestamp
         }
 ```
@@ -218,47 +235,46 @@ ${AIREADI_DATA_PATH}/processed/outcome_matrix.parquet
 
 ### Module 2 → Module 3
 ```
-${AIREADI_DATA_PATH}/artifacts/membership_matrix.parquet
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/membership_matrix.parquet
     - Index: participant_id
     - Columns: pi_1 .. pi_K (soft membership probabilities, sum to 1)
 
-${AIREADI_DATA_PATH}/artifacts/cluster_profiles.parquet
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/cluster_profiles.parquet
     - Cluster centroids back-projected to original feature space
 
-${AIREADI_DATA_PATH}/artifacts/bootstrap_report.json
-    {
-      "K_selected": int,
-      "stability_mean_ARI": float,
-      "stability_CI": [float, float],
-      "B_resamples_run": int,
-      "early_stopped": bool,
-      "cluster_pvalues": [...]
-    }
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/gmm_grid_search.csv  # Full GMM grid search table
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/module2_run_summary.json
+    - Canonical per-run evidence record (config, artifact policy, pruning, PCA, full GMM grid, base diagnostics, bootstrap, profiles, optional SHAP summary)
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/pca_model.joblib
+    - PCA model needed to reproduce transforms/back-projection
 
-${AIREADI_DATA_PATH}/artifacts/gmm_bic_curve.png    # Best BIC per K (diagnostic)
-${AIREADI_DATA_PATH}/artifacts/membership_diagnostics.json
-    {
-      "prop_high_confidence": float,   # share with max prob > 0.7
-      "mean_entropy": float,
-      "max_entropy": float,
-      "bootstrap_ari_std": float | null,
-      "flags": [ ... ]                 # warnings when thresholds triggered
-    }
+Debug-only / optional artifacts (when `module2.artifacts.level: debug` or explicitly enabled):
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/bootstrap_summary.json
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/corr_pruned_features.json
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/membership_diagnostics_base.json
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/membership_diagnostics.json
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/pca_summary.json
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/pca_transformed.parquet
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/pca_loadings.parquet
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/gmm_bic_curve.png
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/shap_distributions.parquet
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/shap_report.json
 
-${AIREADI_DATA_PATH}/artifacts/shap_distributions.parquet
-    - Mean ± 95% CI of |SHAP| per feature per cluster aggregated across bootstrap resamples (SHAP computed inside bootstrap loop)
-${AIREADI_DATA_PATH}/artifacts/shap_report.json
-    - Resamples with SHAP and top 5 features per cluster with |SHAP| mean and 95% CI (present only when SHAP available)
+${AIREADI_DATA_PATH}/artifacts/module2/experiment_comparison.csv
+    - One row per view/experiment candidate, suitable for model selection and downstream reporting tables
+${AIREADI_DATA_PATH}/artifacts/module2/selection_summary.csv
+    - Selection-rule evaluation across candidates (viability, cluster balance, final status)
+Debug-only mirrors:
+${AIREADI_DATA_PATH}/artifacts/module2/experiment_comparison.json
+${AIREADI_DATA_PATH}/artifacts/module2/selection_summary.json
 ```
 
 ### Module 3 → Module 4
 ```
-${AIREADI_DATA_PATH}/artifacts/threshold_posterior.nc        # PRIMARY — NetCDF via ArviZ, threshold model posterior
-${AIREADI_DATA_PATH}/artifacts/two_stage_posterior.nc        # COMPARISON — two-stage model posterior
-${AIREADI_DATA_PATH}/artifacts/joint_posterior.nc            # COMPARISON — joint model posterior
-${AIREADI_DATA_PATH}/artifacts/loo_comparison.csv            # LOO-CV results across all three model variants
-${AIREADI_DATA_PATH}/artifacts/exceedance_curves.parquet     # P(CV<36% | HbA1c stratum, cluster) per cluster
-${AIREADI_DATA_PATH}/artifacts/cluster_contrasts.csv         # Pairwise posterior contrasts + CIs
+Module 3 and Module 4 are currently stubs.
+- `module3_bayesian/pipeline.py` exists but raises `NotImplementedError`
+- `module4_reporting/pipeline.py` exists but raises `NotImplementedError`
+- No Module 3 or Module 4 artifacts are produced yet
 ```
 
 ---
@@ -276,6 +292,21 @@ data:
   artifacts_path: "${AIREADI_DATA_PATH}/artifacts/"
 
 module1:
+  artifacts:
+    level: "standard"
+    write_default_aliases: false
+    save_view_raw_matrices: true
+    save_common_raw_matrix: false
+  clustering_views:
+    cohort_policy: "common"
+    default_view: "wearable_environment"
+    views:
+      wearable:
+        include_prefixes: ["heart_rate_", "oxygen_sat_", "physical_activity_", "calories_", "respiratory_rate_", "stress_", "sleep_"]
+      environment:
+        include_prefixes: ["env_"]
+      wearable_environment:
+        include_prefixes: ["heart_rate_", "oxygen_sat_", "physical_activity_", "calories_", "respiratory_rate_", "stress_", "sleep_", "env_"]
   qc_thresholds:
     wearable:
       min_heart_rate_valid_hour_coverage: 0.70   # Participant excluded if < 70% valid HR hours
@@ -319,15 +350,45 @@ module1:
   normalization: "standard_scaler"   # Applied in assemble.py after join
 
 module2:
-  k_range: [3, 4, 5]
-  covariance_types: ["full", "diagonal", "tied"]
+  k_range: [3, 4]
+  covariance_types: ["diag", "tied"]
   bootstrap_B: 1000
   bootstrap_early_stop_threshold: 0.001
-  pca_variance_threshold: 0.88
+  pca_variance_threshold: 0.80
+  pca_mode: "variance"
+  pca_n_components: null
+  corr_prune: true
+  corr_threshold: 0.9
+  gmm_reg_covar: 0.001
   random_seed: 42
+  artifacts:
+    level: "standard"
+    compute_shap: false
+    save_json_mirrors: false
+  exploration:
+    views: ["wearable", "environment", "wearable_environment"]
+    experiments:
+      - name: "stability_v1"
+        k_range: [3, 4]
+        covariance_types: ["diag", "tied"]
+        pca_mode: "variance"
+        pca_variance_threshold: 0.80
+        gmm_reg_covar: 0.001
+      - name: "k3_only"
+        k_range: [3]
+        covariance_types: ["diag", "tied"]
+        pca_mode: "variance"
+        pca_variance_threshold: 0.80
+        gmm_reg_covar: 0.001
+  selection:
+    min_base_prop_high_confidence: 0.70
+    min_bootstrap_mean_ari: 0.50
+    preferred_min_cluster_fraction: 0.10
+    acceptable_min_cluster_fraction: 0.05
+    view_priority: ["wearable_environment", "environment", "wearable"]
 
 module3:
-  # Model hierarchy: threshold_model = primary; two_stage and joint = comparison
+  # Reserved for future implementation; current pipeline is a stub
   primary_model: "threshold"
   severity_covariates: ["hba1c_stratum", "diabetes_stage", "site"]
   hba1c_strata_boundaries:           # Standard clinical cutoffs — unitless %
@@ -361,23 +422,16 @@ All sensitive paths are resolved from environment variables, never hardcoded. A 
 AIREADI_DATA_PATH=/path/to/your/local/aireadi_storage
 ```
 
-`.env.example` (committed — documents required variables without values):
-```bash
-AIREADI_DATA_PATH=        # Absolute path to your local AI-READI data directory
-```
-
 `.gitignore` must include:
 ```
 .env
-data/
+processed/
+artifacts/
 runs/
-*.parquet
-*.nc
-*.csv
-config/secrets.yaml
+ai-readi-dataset-container/
 ```
 
-Anyone cloning the repo creates their own `.env` pointing to their locally pulled AI-READI data. No data paths, credentials, or participant data ever enter the repo.
+The current `.gitignore` is broader than the abbreviated list above and excludes local data, artifacts, run outputs, and common generated file types.
 
 ---
 
@@ -388,30 +442,27 @@ Anyone cloning the repo creates their own `.env` pointing to their locally pulle
 | Data manipulation | `pandas`, `numpy` |
 | Parquet I/O | `pyarrow` |
 | Dimensionality reduction | `scikit-learn` (PCA, preprocessing) |
-| UMAP | `umap-learn` |
 | Clustering | `scikit-learn` (GaussianMixture) |
 | Bootstrap parallelization | `joblib` |
 | SHAP | `shap` |
-| Gradient boosted classifier | `lightgbm` or `xgboost` |
-| Bayesian modeling | `pymc` |
-| Posterior analysis & diagnostics | `arviz` |
-| Stage 1 regression | `statsmodels` |
-| Figures | `matplotlib`, `seaborn` |
+| Figures / diagnostics | `matplotlib` |
 | Environment variables | `python-dotenv` |
 | Config parsing | `pyyaml` |
-| Environment | `conda` with `environment.yml` lockfile |
+| Test runner | `pytest` |
+
+`environment.yml` currently also pins `umap-learn`, `lightgbm`, `xgboost`, `pymc`, `arviz`, `statsmodels`, and `seaborn` for planned downstream work, but those libraries are not used by the currently implemented pipelines.
 
 ---
 
 ## Experiment Tracking
 
-Every pipeline run creates a timestamped folder under `runs/`. This captures:
-- Exact config snapshot used
-- Git commit hash at time of run
-- Module runtimes
-- Key result summaries (K selected, mean ARI, LOO-CV winner)
-
-This is lightweight — no external tooling like MLflow required unless the grid search grows. A simple Python logging setup writing to `runs/run_YYYYMMDD/logs/` is sufficient.
+Current behavior:
+- `module1_processing/pipeline.py` creates `runs/run_YYYYMMDD_HHMMSS/config_snapshot.yaml`
+- Module 2 experiment outputs are written under `${AIREADI_DATA_PATH}/artifacts/module2/...`
+- Artifact verbosity is config-driven:
+  - `standard` keeps research evidence and reproducibility artifacts
+  - `debug` additionally keeps intermediate matrices, sidecar diagnostics, plot outputs, and JSON mirrors
+- Git commit hashes, structured logs, and runtime manifests are not currently captured automatically
 
 ---
 
@@ -419,22 +470,20 @@ This is lightweight — no external tooling like MLflow required unless the grid
 
 | Task | Strategy |
 |---|---|
-| Bootstrap resamples (Module 2) | `joblib.Parallel` across B iterations — embarrassingly parallel |
-| GMM grid search (K × covariance type) | `joblib.Parallel` across configurations |
-| SHAP computation per resample | Runs inside bootstrap worker — no additional parallelization needed |
-| Bayesian sampling (Module 3) | PyMC runs chains in parallel natively via `cores` argument |
-
-Bootstrap is the most expensive step. At n=2280, K≤5, d~12 (post-PCA), B=1000: estimate ~30–60 min on a local machine with 8 cores. If grid search across K and covariance types is added, multiply by ~9 configurations — at that point a cloud spot instance is worthwhile.
+| Bootstrap resamples (Module 2) | `joblib.Parallel` across B iterations |
+| SHAP computation per resample | Runs inside each bootstrap worker |
+| GMM grid search | Current implementation is serial within a run |
+| Module 3 sampling | Not implemented yet |
 
 ---
 
 ## Testing Strategy
 
-Each module has a corresponding test file. Tests operate on a **synthetic mini-dataset** (n=100, same schema as real data) generated once and committed to `tests/fixtures/`. This means tests never touch real data and run fast.
-
-- **Module 1 tests** — schema validation per modality intermediate, QC report structure correctness, inner join logic (assert participants failing any modality are excluded), normalization applied only post-join
-- **Module 2 tests** — membership probabilities sum to 1, bootstrap loop runs without error, SHAP output shape correctness
-- **Module 3 tests** — threshold model posterior samples valid (R-hat < 1.01), exceedance curve is monotone, LOO-CV table contains all three model variants
+Current test coverage is limited:
+- `tests/test_module1.py` is a placeholder and currently skips
+- `tests/test_module2.py` covers PCA behavior and artifact writing
+- `tests/test_module3.py` is an expected-failure stub because Module 3 is not implemented
+- No committed fixture dataset exists in `tests/fixtures/`
 
 ---
 
@@ -443,22 +492,23 @@ Each module has a corresponding test file. Tests operate on a **synthetic mini-d
 Each `pipeline.py` is callable as a standalone script:
 
 ```bash
-python module1_processing/pipeline.py --config config/config.yaml
-python module2_clustering/pipeline.py --config config/config.yaml
-python module3_bayesian/pipeline.py   --config config/config.yaml
-python module4_reporting/pipeline.py  --config config/config.yaml
+python -m module1_processing.pipeline --config config/config.yaml
+python -m module2_clustering.pipeline --config config/config.yaml
+python -m module2_clustering.experiment_runner --config config/config.yaml
+python -m module3_bayesian.pipeline   --config config/config.yaml
+python -m module4_reporting.pipeline  --config config/config.yaml
 ```
 
-Each pipeline validates its expected input artifacts exist before running. If upstream artifacts are missing or schema-mismatched, the pipeline exits with a descriptive error. No silent failures.
+Implemented pipelines validate expected input artifacts before running. Module 3 and Module 4 currently stop with `NotImplementedError` after config-path validation.
 
 ---
 
-## Residualization Covariate Note
+## Module 3 Note
 
-The diabetes staging variable in AI-READI has four categories:
+The diabetes staging variable configured for future Module 3 work has four categories:
 - `0` = No diabetes
 - `1` = Prediabetes / lifestyle-controlled
 - `2` = Diabetes, oral or non-insulin injectable medications
 - `3` = Diabetes, insulin-controlled
 
-This enters the stage 1 regression as 3 dummy variables (reference = no diabetes) or as an ordinal variable if proportional odds holds. It captures treatment intensity as a proxy for disease severity progression.
+Those covariates are present in `config.yaml`, but the actual Bayesian model code has not been implemented yet.

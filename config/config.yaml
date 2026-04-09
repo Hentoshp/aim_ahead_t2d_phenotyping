@@ -13,6 +13,21 @@ data:
 module1:
   normalization: "standard_scaler"
   missing_strategy: "drop"          # Options: drop | impute (TODO) | none
+  artifacts:
+    level: "standard"               # Options: standard | debug
+    write_default_aliases: false    # Legacy root clustering_matrix alias; keep off once view paths are adopted
+    save_view_raw_matrices: true
+    save_common_raw_matrix: false
+  clustering_views:
+    cohort_policy: "common"         # Options: common
+    default_view: "wearable_environment"
+    views:
+      wearable:
+        include_prefixes: ["heart_rate_", "oxygen_sat_", "physical_activity_", "calories_", "respiratory_rate_", "stress_", "sleep_"]
+      environment:
+        include_prefixes: ["env_"]
+      wearable_environment:
+        include_prefixes: ["heart_rate_", "oxygen_sat_", "physical_activity_", "calories_", "respiratory_rate_", "stress_", "sleep_", "env_"]
   qc_thresholds:
     wearable:
       min_heart_rate_valid_hour_coverage: 0.70
@@ -56,16 +71,43 @@ module1:
 
 module2:
   k_range: [3, 4]
-  covariance_types: ["diagonal", "tied"]
+  covariance_types: ["diag", "tied"]
   bootstrap_B: 1000
   bootstrap_early_stop_threshold: 0.001
-  pca_variance_threshold: 0.75
+  pca_variance_threshold: 0.80
   pca_mode: "variance"          # options: variance | fixed
   pca_n_components: null        # used when pca_mode == fixed
   corr_prune: true
   corr_threshold: 0.9
   gmm_reg_covar: 0.001
   random_seed: 42
+  artifacts:
+    level: "standard"               # Options: standard | debug
+    compute_shap: false             # Enable for final interpretation runs, not default exploration
+    save_json_mirrors: false
+  exploration:
+    views: ["wearable", "environment", "wearable_environment"]
+    experiments:
+      - name: "stability_v1"
+        k_range: [3, 4]
+        covariance_types: ["diag", "tied"]
+        pca_mode: "variance"
+        pca_variance_threshold: 0.80
+        pca_n_components: null
+        gmm_reg_covar: 0.001
+      - name: "k3_only"
+        k_range: [3]
+        covariance_types: ["diag", "tied"]
+        pca_mode: "variance"
+        pca_variance_threshold: 0.80
+        pca_n_components: null
+        gmm_reg_covar: 0.001
+  selection:
+    min_base_prop_high_confidence: 0.70
+    min_bootstrap_mean_ari: 0.50
+    preferred_min_cluster_fraction: 0.10
+    acceptable_min_cluster_fraction: 0.05
+    view_priority: ["wearable_environment", "environment", "wearable"]
 
 module3:
   primary_model: "threshold"

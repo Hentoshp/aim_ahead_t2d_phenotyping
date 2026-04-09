@@ -15,7 +15,7 @@ MODALITIES = [
     "clinical",
 ]
 
-CLUSTERING_PREFIXES = (
+WEARABLE_CLUSTERING_PREFIXES = (
     "heart_rate_",
     "oxygen_sat_",
     "physical_activity_",
@@ -23,8 +23,14 @@ CLUSTERING_PREFIXES = (
     "respiratory_rate_",
     "stress_",
     "sleep_",
+)
+
+ENVIRONMENT_CLUSTERING_PREFIXES = (
     "env_",
 )
+
+CLUSTERING_PREFIXES = WEARABLE_CLUSTERING_PREFIXES + ENVIRONMENT_CLUSTERING_PREFIXES
+
 
 def _is_clustering_feature(col: str) -> bool:
     if not col.startswith(CLUSTERING_PREFIXES):
@@ -38,12 +44,74 @@ def _is_clustering_feature(col: str) -> bool:
     return True
 
 
+def _load_clustering_views(cfg: dict) -> tuple[str, str, dict[str, tuple[str, ...]]]:
+    view_cfg = cfg.get("module1", {}).get("clustering_views", {})
+    cohort_policy = str(view_cfg.get("cohort_policy", "common"))
+    if cohort_policy != "common":
+        raise NotImplementedError("Only cohort_policy='common' is supported.")
+
+    default_views = {
+        "wearable": WEARABLE_CLUSTERING_PREFIXES,
+        "environment": ENVIRONMENT_CLUSTERING_PREFIXES,
+        "wearable_environment": CLUSTERING_PREFIXES,
+    }
+    raw_views = view_cfg.get("views") or {
+        name: {"include_prefixes": list(prefixes)}
+        for name, prefixes in default_views.items()
+    }
+
+    views: dict[str, tuple[str, ...]] = {}
+    for view_name, spec in raw_views.items():
+        prefixes = tuple(spec.get("include_prefixes", []))
+        if not prefixes:
+            raise ValueError(f"Clustering view '{view_name}' must define include_prefixes.")
+        views[str(view_name)] = prefixes
+
+    default_view = str(view_cfg.get("default_view", "wearable_environment"))
+    if default_view not in views:
+        raise ValueError(f"default_view '{default_view}' not found in module1.clustering_views.views")
+
+    return cohort_policy, default_view, views
+
+
+def _select_view_columns(columns: list[str], include_prefixes: tuple[str, ...]) -> list[str]:
+    selected = []
+    for col in columns:
+        if not _is_clustering_feature(col):
+            continue
+        if any(col.startswith(prefix) for prefix in include_prefixes):
+            selected.append(col)
+    return selected
+
+
+def _module1_artifact_policy(cfg: dict) -> dict:
+    raw_cfg = cfg.get("module1", {}).get("artifacts", {})
+    level = str(raw_cfg.get("level", "standard"))
+    defaults = {
+        "standard": {
+            "write_default_aliases": False,
+            "save_view_raw_matrices": True,
+            "save_common_raw_matrix": False,
+        },
+        "debug": {
+            "write_default_aliases": True,
+            "save_view_raw_matrices": True,
+            "save_common_raw_matrix": True,
+        },
+    }
+    if level not in defaults:
+        raise ValueError(f"Unknown module1 artifact level: {level}")
+    return {"level": level, **(defaults[level] | {k: v for k, v in raw_cfg.items() if k != "level"})}
+
+
 def assemble(cfg_path: Path) -> None:
     cfg, base = load_config(cfg_path)
+    artifact_policy = _module1_artifact_policy(cfg)
     inter_dir = Path(cfg["data"]["intermediates_path"].replace("${AIREADI_DATA_PATH}", str(base)))
     processed_path = Path(cfg["data"]["processed_path"].replace("${AIREADI_DATA_PATH}", str(base)))
+    views_root = processed_path / "clustering_views"
 
-    ensure_dirs(processed_path)
+    ensure_dirs(processed_path, views_root)
 
     clinical_df_full = pd.read_parquet(inter_dir / "clinical_features.parquet")
     pre_stage_counts = clinical_df_full["diabetes_stage"].value_counts(dropna=False).to_dict()
@@ -67,14 +135,16 @@ def assemble(cfg_path: Path) -> None:
     if joined.empty:
         raise ValueError("Assembly produced empty feature matrix; check upstream modality outputs and QC thresholds")
 
+    cohort_policy, default_view, clustering_views = _load_clustering_views(cfg)
+
     clustering_cols = [c for c in joined.columns if _is_clustering_feature(c)]
     outcome_cols = [c for c in [
         "glycemic_cv", "mean_glucose", "time_in_range",
         "hba1c", "hba1c_stratum", "diabetes_stage"
     ] if c in joined.columns]
 
-    clustering_df = joined[clustering_cols]
-    outcome_df = joined[outcome_cols]
+    clustering_df = joined[clustering_cols].copy()
+    outcome_df = joined[outcome_cols].copy()
 
     # Right-skewed features → log1p transform before normalization
     skew_prefixes = (
@@ -109,9 +179,11 @@ def assemble(cfg_path: Path) -> None:
     else:
         raise ValueError(f"Unknown missing_strategy: {missing_strategy}")
 
-    # Save unscaled, transformed snapshot for diagnostics
-    raw_path = processed_path / "clustering_matrix_raw.parquet"
-    clustering_df.to_parquet(raw_path)
+    # Save unscaled, transformed common-cohort matrix for diagnostics and view derivation.
+    clustering_df_raw = clustering_df.copy()
+    if artifact_policy["save_common_raw_matrix"]:
+        common_raw_path = processed_path / "clustering_matrix_common_raw.parquet"
+        clustering_df_raw.to_parquet(common_raw_path)
 
     if cfg["module1"].get("normalization") == "standard_scaler" and not clustering_df.empty:
         scaler = StandardScaler()
@@ -121,20 +193,59 @@ def assemble(cfg_path: Path) -> None:
     else:
         norm_meta = {"method": None}
 
-    clustering_path = processed_path / "clustering_matrix.parquet"
-    clustering_df.to_parquet(clustering_path)
+    default_scaled_df: pd.DataFrame | None = None
+    default_raw_df: pd.DataFrame | None = None
+    default_view_meta: dict | None = None
+
+    for view_name, include_prefixes in clustering_views.items():
+        view_cols = _select_view_columns(clustering_df.columns.tolist(), include_prefixes)
+        if not view_cols:
+            raise ValueError(f"Clustering view '{view_name}' selected zero features.")
+
+        scaled_view_df = clustering_df.loc[:, view_cols].copy()
+        raw_view_df = clustering_df_raw.loc[:, view_cols].copy()
+        view_dir = views_root / view_name
+        ensure_dirs(view_dir)
+
+        scaled_view_df.to_parquet(view_dir / "clustering_matrix.parquet")
+        if artifact_policy["save_view_raw_matrices"]:
+            raw_view_df.to_parquet(view_dir / "clustering_matrix_raw.parquet")
+
+        view_meta = {
+            "view_name": view_name,
+            "default_view": view_name == default_view,
+            "cohort_policy": cohort_policy,
+            "n_participants": int(len(scaled_view_df)),
+            "n_features": int(scaled_view_df.shape[1]) if not scaled_view_df.empty else 0,
+            "feature_names": view_cols,
+            "include_prefixes": list(include_prefixes),
+            "modalities": sorted({"environment" if prefix == "env_" else "wearable" for prefix in include_prefixes}),
+            "normalization": norm_meta,
+            "artifact_policy": artifact_policy,
+            "created": pd.Timestamp.utcnow().isoformat(),
+            "dropped_per_step": drop_log,
+        }
+        (view_dir / "clustering_matrix_meta.json").write_text(json.dumps(view_meta, indent=2))
+
+        if view_name == default_view:
+            default_scaled_df = scaled_view_df
+            default_raw_df = raw_view_df
+            default_view_meta = view_meta
+
+    if default_scaled_df is None or default_raw_df is None or default_view_meta is None:
+        raise RuntimeError(f"Default clustering view '{default_view}' was not created.")
+
     outcome_path = processed_path / "outcome_matrix.parquet"
     outcome_df.to_parquet(outcome_path)
 
-    clustering_meta = {
-        "n_participants": int(len(clustering_df)),
-        "n_features": int(clustering_df.shape[1]) if not clustering_df.empty else 0,
-        "modalities": ["wearable", "environment"],
-        "normalization": norm_meta,
-        "created": pd.Timestamp.utcnow().isoformat(),
-        "dropped_per_step": drop_log,
-    }
-    (processed_path / "clustering_matrix_meta.json").write_text(json.dumps(clustering_meta, indent=2))
+    if artifact_policy["write_default_aliases"]:
+        clustering_path = processed_path / "clustering_matrix.parquet"
+        default_scaled_df.to_parquet(clustering_path)
+        if artifact_policy["save_view_raw_matrices"]:
+            raw_path = processed_path / "clustering_matrix_raw.parquet"
+            default_raw_df.to_parquet(raw_path)
+        clustering_meta = dict(default_view_meta)
+        (processed_path / "clustering_matrix_meta.json").write_text(json.dumps(clustering_meta, indent=2))
 
     outcome_meta = {
         "n_participants": int(len(outcome_df)),

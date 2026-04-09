@@ -17,7 +17,7 @@ import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.mixture import GaussianMixture
 
-from module2_clustering.utils import load_config, resolve_paths
+from module2_clustering.utils import default_clustering_view, load_config, resolve_view_paths
 
 
 @dataclass
@@ -138,6 +138,8 @@ def default_specs() -> list[PCASpec]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="PCA/GMM diagnostics sweep")
     parser.add_argument("--config", default="config/config.yaml", help="Path to config.yaml")
+    parser.add_argument("--view", default=None, help="Optional clustering view name")
+    parser.add_argument("--experiment-name", default=None, help="Optional experiment name for view-scoped artifact output")
     parser.add_argument("--k", type=int, default=3, help="Number of GMM components")
     parser.add_argument("--covariance", default="full", help="GMM covariance_type")
     parser.add_argument("--corr-threshold", type=float, default=0.9, help="Correlation threshold for feature pruning")
@@ -152,9 +154,12 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
     cfg = load_config(Path(args.config))
-    paths = resolve_paths(cfg)
+    selected_view = args.view or default_clustering_view(cfg)
+    view_paths = resolve_view_paths(cfg, selected_view, experiment_name=args.experiment_name)
+    matrix_path = view_paths.clustering_matrix
+    default_out = view_paths.artifacts_path / "pca_gmm_diagnostics.parquet"
 
-    df = pd.read_parquet(paths.clustering_matrix)
+    df = pd.read_parquet(matrix_path)
     specs = default_specs()
 
     summary = run_diagnostics(
@@ -166,7 +171,7 @@ def main():
         random_state=cfg["module2"].get("random_seed"),
     )
 
-    out_path = Path(args.out) if args.out else Path(paths.artifacts_path) / "pca_gmm_diagnostics.parquet"
+    out_path = Path(args.out) if args.out else default_out
     out_path.parent.mkdir(parents=True, exist_ok=True)
     summary.to_parquet(out_path, index=False)
     summary.to_csv(out_path.with_suffix(".csv"), index=False)

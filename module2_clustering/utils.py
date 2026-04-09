@@ -26,6 +26,17 @@ class Paths:
     runs_path: Path
 
 
+@dataclass
+class ViewPaths:
+    """Resolved paths for a named clustering view."""
+
+    view_name: str
+    processed_dir: Path
+    clustering_matrix: Path
+    clustering_meta: Path
+    artifacts_path: Path
+
+
 def load_config(cfg_path: Path) -> Dict[str, Any]:
     """Load YAML config with no mutation."""
 
@@ -55,10 +66,29 @@ def resolve_paths(cfg: Dict[str, Any]) -> Paths:
     )
 
 
+def default_clustering_view(cfg: Dict[str, Any]) -> str:
+    return str(cfg.get("module1", {}).get("clustering_views", {}).get("default_view", "wearable_environment"))
+
+
+def resolve_view_paths(cfg: Dict[str, Any], view_name: str, experiment_name: str | None = None) -> ViewPaths:
+    paths = resolve_paths(cfg)
+    processed_dir = paths.processed_path / "clustering_views" / view_name
+    artifacts_dir = paths.artifacts_path / "module2" / view_name
+    if experiment_name:
+        artifacts_dir = artifacts_dir / experiment_name
+
+    return ViewPaths(
+        view_name=view_name,
+        processed_dir=processed_dir,
+        clustering_matrix=processed_dir / "clustering_matrix.parquet",
+        clustering_meta=processed_dir / "clustering_matrix_meta.json",
+        artifacts_path=artifacts_dir,
+    )
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
 def _substitute_env(template: str, data_root: Path) -> Path:
     return Path(template.replace("${AIREADI_DATA_PATH}", str(data_root))).expanduser()
-
