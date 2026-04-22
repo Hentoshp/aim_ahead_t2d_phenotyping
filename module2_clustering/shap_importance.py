@@ -2,17 +2,58 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import List
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-import shap
+
 
 @dataclass
 class SHAPResult:
     shap_values: List[np.ndarray]
     summary: pd.DataFrame
+
+
+def _normalize_shap_values(raw_shap_values, n_features: int) -> list[np.ndarray]:
+    """Normalize SHAP outputs to one 2D array per class.
+
+    Supported formats:
+    - list of arrays: [(n_samples, n_features), ...]
+    - ndarray: (n_samples, n_features)
+    - ndarray: (n_samples, n_features, n_classes)
+    - ndarray: (n_samples, n_classes, n_features)
+    - Explanation-like object with `.values`
+    """
+
+    values = getattr(raw_shap_values, "values", raw_shap_values)
+
+    if isinstance(values, list):
+        normalized = [np.asarray(v) for v in values]
+    else:
+        arr = np.asarray(values)
+        if arr.ndim == 2:
+            normalized = [arr]
+        elif arr.ndim == 3:
+            if arr.shape[1] == n_features:
+                normalized = [arr[:, :, class_idx] for class_idx in range(arr.shape[2])]
+            elif arr.shape[2] == n_features:
+                normalized = [arr[:, class_idx, :] for class_idx in range(arr.shape[1])]
+            else:
+                raise ValueError(
+                    f"Unsupported 3D SHAP array shape {arr.shape}; expected one axis to match n_features={n_features}"
+                )
+        else:
+            raise ValueError(f"Unsupported SHAP values ndim={arr.ndim}; expected 2D or 3D output.")
+
+    for idx, arr in enumerate(normalized):
+        if arr.ndim != 2:
+            raise ValueError(f"Normalized SHAP array at class {idx} is not 2D: shape={arr.shape}")
+        if arr.shape[1] != n_features:
+            raise ValueError(
+                f"Normalized SHAP array at class {idx} has {arr.shape[1]} features; expected {n_features}"
+            )
+    return normalized
 
 
 def compute_shap_distributions(
@@ -43,15 +84,12 @@ def compute_shap_distributions(
     )
     clf.fit(X, cluster_labels)
 
+    import shap
+
     explainer = shap.TreeExplainer(clf)
-    shap_vals = explainer.shap_values(X)
+    shap_vals = _normalize_shap_values(explainer.shap_values(X), n_features=X.shape[1])
 
-    # shap returns list per class for multiclass
     summaries = []
-    n_classes = len(shap_vals) if isinstance(shap_vals, list) else shap_vals.shape[1]
-    if not isinstance(shap_vals, list):
-        shap_vals = [shap_vals]  # binary with margin output
-
     for c, sv in enumerate(shap_vals):
         mean = sv.mean(axis=0)
         abs_mean = np.abs(sv).mean(axis=0)

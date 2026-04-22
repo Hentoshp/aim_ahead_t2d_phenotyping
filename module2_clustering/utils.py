@@ -37,6 +37,16 @@ class ViewPaths:
     artifacts_path: Path
 
 
+@dataclass
+class SelectedPaths:
+    """Resolved paths for a promoted clustering solution."""
+
+    slot: str
+    root: Path
+    manifest_path: Path
+    shap_dir: Path
+
+
 def load_config(cfg_path: Path) -> Dict[str, Any]:
     """Load YAML config with no mutation."""
 
@@ -83,6 +93,18 @@ def resolve_view_paths(cfg: Dict[str, Any], view_name: str, experiment_name: str
         clustering_matrix=processed_dir / "clustering_matrix.parquet",
         clustering_meta=processed_dir / "clustering_matrix_meta.json",
         artifacts_path=artifacts_dir,
+    )
+
+
+def resolve_selected_paths(cfg: Dict[str, Any], slot: str) -> SelectedPaths:
+    paths = resolve_paths(cfg)
+    slot_name = str(slot)
+    root = paths.artifacts_path / "module2" / "selected" / slot_name
+    return SelectedPaths(
+        slot=slot_name,
+        root=root,
+        manifest_path=root / "selection_manifest.json",
+        shap_dir=root / "shap",
     )
 
 

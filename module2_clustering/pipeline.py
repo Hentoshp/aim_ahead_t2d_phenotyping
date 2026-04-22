@@ -10,6 +10,7 @@ import logging
 from pathlib import Path
 
 import json
+import joblib
 import pandas as pd
 
 from module2_clustering.artifact_policy import resolve_module2_artifact_policy
@@ -233,6 +234,7 @@ def run_pipeline(
         if artifact_policy.save_plots:
             gmm_clustering.plot_bic_curve(gmm_grid.grid, artifacts_path)
         gmm_grid.grid.to_csv(artifacts_path / "gmm_grid_search.csv", index=False)
+        joblib.dump(best_fit.model, artifacts_path / "gmm_model.joblib")
         # base-fit membership diagnostics (no bootstrap averaging)
         base_membership = best_fit.model.predict_proba(pca_result.transformed.values)
         base_diag = gmm_clustering.membership_flags(base_membership, bootstrap_ari_std=None)

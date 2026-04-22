@@ -10,6 +10,7 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from module2_clustering.dimensionality_reduction import PCAResult, run_pca, save_pca_artifacts
+from module2_clustering.shap_importance import _normalize_shap_values
 
 
 def _make_df(n_rows=200, n_features=5, seed=0):
@@ -76,6 +77,24 @@ def test_run_pca_deterministic_with_seed():
 
     assert np.allclose(res1.transformed, res2.transformed)
     assert np.allclose(res1.pca_model.components_, res2.pca_model.components_)
+
+
+def test_normalize_shap_values_handles_3d_samples_features_classes():
+    raw = np.arange(2 * 3 * 4, dtype=float).reshape(2, 3, 4)
+    normalized = _normalize_shap_values(raw, n_features=3)
+
+    assert len(normalized) == 4
+    assert all(arr.shape == (2, 3) for arr in normalized)
+    assert np.allclose(normalized[0], raw[:, :, 0])
+
+
+def test_normalize_shap_values_handles_3d_samples_classes_features():
+    raw = np.arange(2 * 4 * 3, dtype=float).reshape(2, 4, 3)
+    normalized = _normalize_shap_values(raw, n_features=3)
+
+    assert len(normalized) == 4
+    assert all(arr.shape == (2, 3) for arr in normalized)
+    assert np.allclose(normalized[0], raw[:, 0, :])
 
 
 @pytest.mark.xfail(reason="Remaining Module 2 components not yet implemented")

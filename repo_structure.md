@@ -46,6 +46,9 @@ ${AIREADI_DATA_PATH}/
     └── module2/
         ├── experiment_comparison.csv
         ├── selection_summary.csv
+        ├── selected/
+        │   ├── primary/
+        │   └── sensitivity/
         ├── wearable/
         ├── environment/
         └── wearable_environment/
@@ -76,6 +79,8 @@ project_root/
 │   ├── cluster_profiling.py         # Back-projection, radar plots, profile tables
 │   ├── diagnostics.py               # Standalone PCA/GMM diagnostic sweep
 │   ├── experiment_runner.py         # Runs view x config experiments and writes comparison tables
+│   ├── promote_solution.py          # Writes canonical selection manifests for downstream use
+│   ├── run_shap.py                  # Final SHAP interpretation on promoted or explicit solutions
 │   └── pipeline.py
 │
 ├── module3_bayesian/
@@ -135,12 +140,25 @@ QC thresholds are fully defined in `config.yaml`.
 
 - **Wearable** (`wearable_features.py`) — participant-level summaries plus modality-level valid-hour coverage. These feed `clustering_matrix.parquet`. Per-feature summary strategy:
   - `heart_rate` — median, IQR, resting HR (sleep-period median)
-  - `oxygen_saturation` — proportion of hours below 95%, IQR
+  - `oxygen_saturation` — median, IQR, proportion of hours below 95%
   - `physical_activity` — median, IQR
   - `calories` — median, IQR (zero is valid per QC; non-wear filtered by HR coverage)
   - `respiratory_rate` — median, IQR (note: sleep-period median may be stronger alternative — deferred pending distribution review)
   - `sleep` — total sleep duration median + IQR, combined deep+REM duration median (no per-stage medians/IQRs)
   - `stress` — median, IQR (note: structured missingness during exercise — active participants have fewer readings)
+- Exact clustering features and units (pre-transform / pre-standardization):
+
+| Feature | Unit |
+| --- | --- |
+| `heart_rate_median`, `heart_rate_iqr`, `heart_rate_resting_median` | beats per minute (`bpm`) |
+| `oxygen_sat_median`, `oxygen_sat_iqr` | oxygen saturation percentage (`% SpO2`) |
+| `oxygen_sat_prop_below_95` | proportion in `[0,1]` |
+| `physical_activity_median`, `physical_activity_iqr` | Garmin `base_movement_quantity` device-native units (daily summed, then participant median/IQR) |
+| `calories_median`, `calories_iqr` | Garmin calorie value (device-reported calories / kcal-equivalent per day) |
+| `respiratory_rate_median`, `respiratory_rate_iqr` | breaths per minute |
+| `stress_median`, `stress_iqr` | Garmin stress score, unitless index (`0–100`) |
+| `sleep_total_median_hr`, `sleep_total_iqr_hr`, `sleep_deep_rem_median_hr` | hours per night |
+
 - **Environment** (`environment_features.py`) — participant-level summaries plus modality-level valid-hour coverage. These feed `clustering_matrix.parquet`. Per-feature summary strategy:
   - `pm10` — median, IQR (pm1/pm2.5 dropped as redundant with pm10)
   - `humidity` — median, IQR (note: expected correlation with temperature)
@@ -148,11 +166,29 @@ QC thresholds are fully defined in `config.yaml`.
   - `voc` — median, IQR, proportion of hours above 150 (meaningful elevation above adaptive baseline)
   - `nox` — proportion of hours above 20 (meaningful elevation per sensor documentation); no median retained
   - `light_total` — total intensity median (sum of lch0–lch11), proportion of hours above data-derived threshold (inspect distribution to define)
+- Exact clustering features and units (pre-transform / pre-standardization):
+
+| Feature | Unit |
+| --- | --- |
+| `env_pm10_median`, `env_pm10_iqr` | sensor-reported PM10 concentration units (retained as reported by the Anura device) |
+| `env_hum_median`, `env_hum_iqr` | relative humidity (`%`) |
+| `env_temp_median`, `env_temp_iqr` | degrees Celsius (`°C`) |
+| `env_voc_median`, `env_voc_iqr` | VOC index units (sensor index; unitless) |
+| `env_voc_prop_high` | proportion in `[0,1]` above VOC index threshold 150 |
+| `env_nox_prop_high` | proportion in `[0,1]` above NOx index threshold 20 |
+| `env_light_total_median`, `env_light_total_iqr` | summed light-channel intensity in raw summed sensor units (`lch0–lch11`) |
+| `env_light_total_prop_high` | proportion in `[0,1]` above the configured light-total threshold |
 
 **Dropped features:**
-  - `pm4` — estimated from PM1/PM2.5 by sensor algorithm, not independently measured; redundant with PM1 and PM2.5
-  - `lch0–lch11` — 12 individual spectral channels collapsed into `light_total`; individual channels highly correlated and non-interpretable for lifestyle clustering
-  - `screen` — not used as a feature
+  - `sleep_awake_*`, `sleep_deep_*`, `sleep_light_*`, `sleep_rem_*` — stage-specific sleep duration summaries in hours/night; collapsed upstream to `sleep_total_*` and `sleep_deep_rem_median_hr`
+  - `pm1_*`, `pm2.5_*` — sensor-reported particulate concentration units; dropped upstream as redundant with `pm10_*`
+  - `pm4` — sensor-reported particulate concentration units, estimated from PM1/PM2.5 by the device algorithm and not independently measured; dropped as redundant
+  - `env_nox_median`, `env_nox_iqr` — NOx index units (sensor index; unitless); dropped upstream, retaining only `env_nox_prop_high`
+  - `lch0–lch11` — raw individual light-channel intensities in device-native units; collapsed into `env_light_total_*`
+  - `screen` — raw device screen channel / event measure; not used as a feature
+  - Module 2 correlation pruning may additionally drop highly collinear engineered features at runtime (for the current default view/config, `env_pm10_iqr` is typically pruned at `|r| > 0.9`)
+
+- Unit note: units above refer to engineered features before any `log1p` transform or z-score standardization in `assemble.py`. Features in `clustering_matrix.parquet` are standardized; some right-skewed inputs (`calories`, `respiratory_rate`, `sleep_total*`, `pm10`, `light_total`) are also `log1p` transformed before scaling.
 - **CGM** (`cgm_features.py`) — computes finished outcome features directly from valid glucose observations; no median/IQR. Outputs:
   - `glycemic_cv` (PRIMARY) — (SD / mean) × 100 over valid observations
   - `mean_glucose` — falls out of CV calculation at no extra cost, retained for reporting
@@ -247,6 +283,8 @@ ${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/module2_run_summary.j
     - Canonical per-run evidence record (config, artifact policy, pruning, PCA, full GMM grid, base diagnostics, bootstrap, profiles, optional SHAP summary)
 ${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/pca_model.joblib
     - PCA model needed to reproduce transforms/back-projection
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/gmm_model.joblib
+    - Selected GMM model for reproducibility and downstream interpretation
 
 Debug-only / optional artifacts (when `module2.artifacts.level: debug` or explicitly enabled):
 ${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/bootstrap_summary.json
@@ -264,6 +302,12 @@ ${AIREADI_DATA_PATH}/artifacts/module2/experiment_comparison.csv
     - One row per view/experiment candidate, suitable for model selection and downstream reporting tables
 ${AIREADI_DATA_PATH}/artifacts/module2/selection_summary.csv
     - Selection-rule evaluation across candidates (viability, cluster balance, final status)
+${AIREADI_DATA_PATH}/artifacts/module2/selected/<slot>/selection_manifest.json
+    - Lightweight promotion manifest pointing to the selected source run
+${AIREADI_DATA_PATH}/artifacts/module2/selected/<slot>/shap/shap_summary.parquet
+${AIREADI_DATA_PATH}/artifacts/module2/selected/<slot>/shap/shap_report.json
+${AIREADI_DATA_PATH}/artifacts/module2/selected/<slot>/shap/base_cluster_assignments.parquet
+    - Final SHAP interpretation outputs computed on original pruned features using base-fit cluster labels
 Debug-only mirrors:
 ${AIREADI_DATA_PATH}/artifacts/module2/experiment_comparison.json
 ${AIREADI_DATA_PATH}/artifacts/module2/selection_summary.json
@@ -495,6 +539,8 @@ Each `pipeline.py` is callable as a standalone script:
 python -m module1_processing.pipeline --config config/config.yaml
 python -m module2_clustering.pipeline --config config/config.yaml
 python -m module2_clustering.experiment_runner --config config/config.yaml
+python -m module2_clustering.promote_solution --config config/config.yaml --slot primary --view wearable_environment --experiment stability_v1
+python -m module2_clustering.run_shap --config config/config.yaml --slot primary
 python -m module3_bayesian.pipeline   --config config/config.yaml
 python -m module4_reporting.pipeline  --config config/config.yaml
 ```
