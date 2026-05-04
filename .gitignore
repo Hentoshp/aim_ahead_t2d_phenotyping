@@ -165,3 +165,8 @@ build/
 _site/
 site/
 public/
+
+############################
+# Local poster scripts
+############################
+poster/*.py

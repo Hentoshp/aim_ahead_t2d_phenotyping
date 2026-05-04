@@ -1,1 +1,0 @@
-"""Poster asset generation scripts."""

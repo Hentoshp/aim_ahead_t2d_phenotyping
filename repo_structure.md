@@ -65,7 +65,7 @@ project_root/
 │   ├── wearable_features.py         # Extract wearable features → intermediate
 │   ├── cgm_features.py              # Extract CGM features → intermediate
 │   ├── environment_features.py      # Extract environment features → intermediate
-│   ├── clinical_features.py         # Extract clinical vars (HbA1c, diabetes stage, site) → intermediate
+│   ├── clinical_features.py         # Extract clinical vars (continuous HbA1c, diabetes stage) → intermediate
 │   ├── assemble.py                  # Inner join intermediates → clustering_matrix + outcome_matrix
 │   ├── explore.py                   # PCA fitness checks on a clustering view — runs after assemble
 │   └── pipeline.py                  # Orchestrates module 1 end-to-end
@@ -194,7 +194,7 @@ QC thresholds are fully defined in `config.yaml`.
   - `mean_glucose` — falls out of CV calculation at no extra cost, retained for reporting
   - `time_in_range` (SECONDARY) — proportion of readings 70–180 mg/dL; acknowledged 10-day limitation, available for sensitivity analysis
   These feed `outcome_matrix.parquet` only — never enter clustering.
-- **Clinical** (`clinical_features.py`) — HbA1c, HbA1c stratum, diabetes stage. Reserved for downstream severity stratification only — not used as clustering inputs. Feeds `outcome_matrix.parquet`.
+- **Clinical** (`clinical_features.py`) — continuous HbA1c and diabetes stage. Reserved for downstream severity stratification only — not used as clustering inputs. Feeds `outcome_matrix.parquet`.
 
 ### Assembly Script (`assemble.py`)
 - Reads all modality intermediates
@@ -205,7 +205,7 @@ QC thresholds are fully defined in `config.yaml`.
 - Produces two strictly separated output artifact families:
   - **`processed/clustering_views/<view>/clustering_matrix.parquet`** — normalized clustering input for a named view (`wearable`, `environment`, `wearable_environment`). CGM and clinical variables are explicitly excluded.
   - **`processed/clustering_views/<view>/clustering_matrix_meta.json`** — view-level metadata and artifact policy.
-  - **`outcome_matrix.parquet`** — CGM-derived glycemic features + clinical variables (HbA1c stratum, diabetes stage), not normalized. Consumed directly by Module 3. Never touches Module 2.
+  - **`outcome_matrix.parquet`** — CGM-derived glycemic features + clinical variables (continuous HbA1c, diabetes stage), not normalized. Consumed directly by Module 3. Never touches Module 2.
   - **Optional compatibility aliases** — `processed/clustering_matrix*.{parquet,json}` and `processed/clustering_matrix_common_raw.parquet` are written only when `module1.artifacts.write_default_aliases` / debug outputs are enabled.
 - Normalization applied to `clustering_matrix` only — outcome variables remain in natural units for interpretability
 - Log transforms: `log1p` applied pre-normalization to right-skewed clustering features (calories, respiratory_rate, sleep_total*, pm10, light_total); proportion features are left as-is.
@@ -264,7 +264,7 @@ ${AIREADI_DATA_PATH}/processed/outcome_matrix.parquet
     - Index: participant_id
     - Columns:
         CGM:      glycemic_cv, mean_glucose, time_in_range
-        Clinical: hba1c, hba1c_stratum, diabetes_stage, site
+        Clinical: hba1c, diabetes_stage
     - Not normalized — retained in natural units
     - Participant IDs are aligned with clustering_matrix (same inner join cohort)
 ```
@@ -372,7 +372,7 @@ module1:
     environment:
       pm1_min: 0
       pm1_max: 65536
-      pm2_5_min: 0                    # TODO: verify PM2.5 availability in raw sensor data
+      pm2_5_min: 0                   
       pm2_5_max: 65536
       # pm4 dropped — estimated from PM1/PM2.5, not independently measured
       pm10_min: 0
@@ -434,11 +434,8 @@ module2:
 module3:
   # Reserved for future implementation; current pipeline is a stub
   primary_model: "threshold"
-  severity_covariates: ["hba1c_stratum", "diabetes_stage", "site"]
-  hba1c_strata_boundaries:           # Standard clinical cutoffs — unitless %
-    well_controlled: 7.0             # < 7.0%
-    moderate: 9.0                    # 7.0–9.0%
-    # poor control: > 9.0%
+  severity_covariates: ["hba1c", "diabetes_stage"]
+  # hba1c is modeled as a continuous covariate (%), not stratified
   # diabetes_stage: 4-level categorical (0=no diabetes, 1=prediabetes,
   #                 2=oral/non-insulin injectable, 3=insulin-controlled)
   primary_outcome: "glycemic_cv"
@@ -557,4 +554,10 @@ The diabetes staging variable configured for future Module 3 work has four categ
 - `2` = Diabetes, oral or non-insulin injectable medications
 - `3` = Diabetes, insulin-controlled
 
-Those covariates are present in `config.yaml`, but the actual Bayesian model code has not been implemented yet.
+For planned Module 3 work, baseline severity adjustment is intended to use:
+- Continuous `hba1c`
+- `diabetes_stage`
+
+`site` is not part of the planned covariate set, and `hba1c` is intended to remain continuous rather than being binned into `hba1c_stratum`.
+
+Those covariates are described in `config.yaml`, but the actual Bayesian model code has not been implemented yet.

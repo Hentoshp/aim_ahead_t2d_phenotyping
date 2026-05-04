@@ -140,7 +140,7 @@ def assemble(cfg_path: Path) -> None:
     clustering_cols = [c for c in joined.columns if _is_clustering_feature(c)]
     outcome_cols = [c for c in [
         "glycemic_cv", "mean_glucose", "time_in_range",
-        "hba1c", "hba1c_stratum", "diabetes_stage"
+        "hba1c", "diabetes_stage"
     ] if c in joined.columns]
 
     clustering_df = joined[clustering_cols].copy()

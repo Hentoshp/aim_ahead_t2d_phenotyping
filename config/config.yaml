@@ -111,10 +111,7 @@ module2:
 
 module3:
   primary_model: "threshold"
-  severity_covariates: ["hba1c_stratum", "diabetes_stage", "site"]
-  hba1c_strata_boundaries:
-    well_controlled: 7.0
-    moderate: 9.0
+  severity_covariates: ["hba1c", "diabetes_stage"]
   primary_outcome: "glycemic_cv"
   cv_clinical_threshold: 36.0
   run_comparison_models: true

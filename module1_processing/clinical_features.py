@@ -88,27 +88,9 @@ def build_clinical_features(cfg_path: Path) -> None:
             "hba1c": hba1c_val,
         })
 
-    # HbA1c strata derived from config thresholds
-    strata_cfg = cfg.get("module3", {}).get("hba1c_strata_boundaries", {})
-    well = strata_cfg.get("well_controlled")
-    moderate = strata_cfg.get("moderate")
-    if well is None or moderate is None:
-        raise ValueError("module3.hba1c_strata_boundaries must define well_controlled and moderate cutpoints")
-
-    def stratify(val):
-        if pd.isna(val):
-            return None
-        if val < well:
-            return "well_controlled"
-        if val < moderate:
-            return "moderate"
-        return "poor"
-
     features_df = pd.DataFrame(rows)
     if features_df.empty:
         raise ValueError("Clinical features empty after exclusions; check stage/hba1c availability")
-
-    features_df["hba1c_stratum"] = features_df["hba1c"].apply(stratify)
 
     features_df = features_df.set_index("person_id")
     features_df.to_parquet(inter_dir / "clinical_features.parquet")
@@ -120,7 +102,7 @@ def build_clinical_features(cfg_path: Path) -> None:
         "n_excluded": int(len(participants) - len(features_df)),
         "exclusion_reasons": exclusion_reasons,
         "thresholds_applied": {},
-        "notes": "Clinical features include hba1c, stratum, diabetes_stage",
+        "notes": "Clinical features include continuous hba1c and diabetes_stage",
     }
     (qc_dir / "clinical_qc.json").write_text(json.dumps(qc, indent=2))
 
