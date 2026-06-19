@@ -191,7 +191,6 @@ def run_pipeline(
         model_path = artifacts_path / "pca_model.joblib"
         if not model_path.exists():
             raise FileNotFoundError("PCA model artifact missing; cannot skip pca step.")
-        import joblib
         pca_model = joblib.load(model_path)
         if trans_path.exists():
             transformed = pd.read_parquet(trans_path)
@@ -288,7 +287,18 @@ def run_pipeline(
 
     # 5) Profiling
     if "profiling" in steps:
-        membership_df = cluster_profiling.build_membership_matrix(matrix.index, boot.membership_matrix, artifacts_path=artifacts_path)
+        membership_df = cluster_profiling.build_membership_matrix(
+            matrix.index,
+            base_membership,
+            artifacts_path=artifacts_path,
+        )
+        if artifact_policy.save_debug_sidecars:
+            cluster_profiling.build_membership_matrix(
+                matrix.index,
+                boot.membership_matrix,
+                artifacts_path=artifacts_path,
+                output_name="membership_matrix_bootstrap_mean.parquet",
+            )
         profiles_df = cluster_profiling.back_project_centroids(
             pca_result.pca_model,
             best_fit.model,

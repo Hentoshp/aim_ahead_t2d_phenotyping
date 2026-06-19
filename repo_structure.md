@@ -35,13 +35,16 @@ ${AIREADI_DATA_PATH}/
 │   │   ├── wearable/
 │   │   │   ├── clustering_matrix.parquet
 │   │   │   ├── clustering_matrix_raw.parquet
-│   │   │   └── clustering_matrix_meta.json
+│   │   │   ├── clustering_matrix_meta.json
+│   │   │   ├── outcome_matrix.parquet
+│   │   │   ├── outcome_matrix_meta.json
+│   │   │   └── assemble_balance.json
 │   │   ├── environment/
 │   │   └── wearable_environment/
-│   ├── outcome_matrix.parquet       # CGM + clinical vars → Module 3 directly
-│   ├── outcome_matrix_meta.json
-│   ├── assemble_balance.json
-│   └── clustering_matrix*.parquet    # Optional root default-view aliases in debug / compatibility mode
+│   ├── outcome_matrix.parquet       # Default-view alias for CGM + clinical vars → Module 3 directly
+│   ├── outcome_matrix_meta.json     # Default-view alias metadata
+│   ├── assemble_balance.json        # Default-view alias balance audit
+│   └── clustering_matrix*.parquet   # Optional root default-view aliases in debug / compatibility mode
 └── artifacts/                       # Module 2+ outputs
     └── module2/
         ├── experiment_comparison.csv
@@ -56,7 +59,6 @@ ${AIREADI_DATA_PATH}/
 # Repo root — agent scope limited to here
 project_root/
 │
-├── data_processing.py              # Legacy standalone processing script; not part of current modular pipeline
 ├── config/
 │   └── config.yaml                  # All parameters — data paths reference ${AIREADI_DATA_PATH}
 │
@@ -84,7 +86,10 @@ project_root/
 │   └── pipeline.py
 │
 ├── module3_bayesian/
-│   └── pipeline.py                  # Stub — validates config path then raises NotImplementedError
+│   ├── pipeline.py                  # Bayesian Module 3 models using Module 2 cluster probabilities
+│   └── plot_cv_bins.py              # Poster-style CV bin counts by top cluster from Module 3 outputs
+│
+├── parquet_utils.py                 # Shared parquet reader with environment/version compatibility hints
 │
 ├── module4_reporting/
 │   └── pipeline.py                  # Stub — validates config path then raises NotImplementedError
@@ -92,7 +97,9 @@ project_root/
 ├── tests/
 │   ├── test_module1.py
 │   ├── test_module2.py
-│   └── test_module3.py
+│   ├── test_module3.py
+│   ├── test_module3_plot.py
+│   └── test_parquet_utils.py
 │
 ├── runs/                            # Experiment tracking — one folder per run
 │   └── run_YYYYMMDD_HHMMSS/
@@ -192,24 +199,33 @@ QC thresholds are fully defined in `config.yaml`.
 - **CGM** (`cgm_features.py`) — computes finished outcome features directly from valid glucose observations; no median/IQR. Outputs:
   - `glycemic_cv` (PRIMARY) — (SD / mean) × 100 over valid observations
   - `mean_glucose` — falls out of CV calculation at no extra cost, retained for reporting
-  - `time_in_range` (SECONDARY) — proportion of readings 70–180 mg/dL; acknowledged 10-day limitation, available for sensitivity analysis
+  - `time_in_range` — proportion of readings 70–180 mg/dL; retained for descriptive summaries
+  - `time_below_70` (PRIMARY low-glucose burden metric) — proportion of readings below 70 mg/dL
+  - `time_below_54` (SECONDARY stricter low-glucose burden metric) — proportion of readings below 54 mg/dL
   These feed `outcome_matrix.parquet` only — never enter clustering.
 - **Clinical** (`clinical_features.py`) — continuous HbA1c and diabetes stage. Reserved for downstream severity stratification only — not used as clustering inputs. Feeds `outcome_matrix.parquet`.
 
 ### Assembly Script (`assemble.py`)
 - Reads all modality intermediates
-- **Inner join on participant_id** — only participants present in all modalities and passing QC are retained
-- Logs final n after join with breakdown of who was dropped at which modality
-- Missing handling: wearable/env missing values are allowed initially; `module1.missing_strategy` controls handling before clustering (default `drop` removes any row with NaNs from the common clustering cohort and aligned outcome matrix)
-- Builds named clustering views on the same common cohort, driven by `module1.clustering_views` in `config.yaml`
+- Builds cohorts by joining the modalities required for each view on `participant_id`
+- `module1.clustering_views.cohort_policy` controls how broad the join is:
+  - `common` — every view uses the same all-required-modality cohort
+  - `view_specific` — each view uses only the modalities it needs; this is the current default
+- View requirements can be inferred from the view prefixes or overridden explicitly with `required_modalities`
+- Logs final `n` and drop counts for each assembled view
+- Missing handling: wearable/env missing values are allowed initially; `module1.missing_strategy` controls handling before clustering (default `drop` removes rows with NaNs from that view's clustering cohort and aligned outcome matrix)
+- Builds named clustering views driven by `module1.clustering_views` in `config.yaml`
 - Produces two strictly separated output artifact families:
   - **`processed/clustering_views/<view>/clustering_matrix.parquet`** — normalized clustering input for a named view (`wearable`, `environment`, `wearable_environment`). CGM and clinical variables are explicitly excluded.
   - **`processed/clustering_views/<view>/clustering_matrix_meta.json`** — view-level metadata and artifact policy.
-  - **`outcome_matrix.parquet`** — CGM-derived glycemic features + clinical variables (continuous HbA1c, diabetes stage), not normalized. Consumed directly by Module 3. Never touches Module 2.
+  - **`processed/clustering_views/<view>/outcome_matrix.parquet`** — CGM-derived glycemic features + clinical variables (continuous HbA1c, diabetes stage), not normalized, aligned to that view's cohort. Consumed directly by Module 3. Never touches Module 2.
+  - **`processed/clustering_views/<view>/outcome_matrix_meta.json`** — metadata for the view-specific outcome matrix.
+  - **`processed/clustering_views/<view>/assemble_balance.json`** — disease-stage retention audit for that view.
+  - **`processed/outcome_matrix.parquet`** — compatibility alias for the default view's outcome matrix.
   - **Optional compatibility aliases** — `processed/clustering_matrix*.{parquet,json}` and `processed/clustering_matrix_common_raw.parquet` are written only when `module1.artifacts.write_default_aliases` / debug outputs are enabled.
 - Normalization applied to `clustering_matrix` only — outcome variables remain in natural units for interpretability
 - Log transforms: `log1p` applied pre-normalization to right-skewed clustering features (calories, respiratory_rate, sleep_total*, pm10, light_total); proportion features are left as-is.
-- Stage balance audit written to `assemble_balance.json`; warns if any stage loses >20% of participants across assembly
+- A stage balance audit is written per view; the root `assemble_balance.json` mirrors the default view and warns if any stage loses >20% of participants there
 
 ### Exploration Script (`explore.py`)
 Runs after `assemble.py` on the configured default view by default, or on a named view via `--view`. Purely diagnostic — produces no artifacts consumed downstream.
@@ -244,11 +260,12 @@ ${AIREADI_DATA_PATH}/processed/clustering_views/<view>/clustering_matrix.parquet
     - Columns: view-specific wearable/environment features ONLY, normalized
     - No CGM or clinical variables
     - No nulls
-    - Shared common cohort across all views
+    - Cohort depends on the view's required modalities when `cohort_policy: view_specific`
     - Metadata sidecar: clustering_matrix_meta.json
         {
           "view_name": str,
-          "cohort_policy": "common",
+          "cohort_policy": "common" | "view_specific",
+          "required_modalities": [...],
           "n_participants": int,
           "n_features": int,
           "feature_names": [...],
@@ -260,20 +277,28 @@ ${AIREADI_DATA_PATH}/processed/clustering_views/<view>/clustering_matrix.parquet
 
 ### Module 1 → Module 3 (direct — bypasses Module 2)
 ```
-${AIREADI_DATA_PATH}/processed/outcome_matrix.parquet
+${AIREADI_DATA_PATH}/processed/clustering_views/<view>/outcome_matrix.parquet
     - Index: participant_id
     - Columns:
-        CGM:      glycemic_cv, mean_glucose, time_in_range
+        CGM:      glycemic_cv, mean_glucose, time_in_range, time_below_70, time_below_54
         Clinical: hba1c, diabetes_stage
     - Not normalized — retained in natural units
-    - Participant IDs are aligned with clustering_matrix (same inner join cohort)
+    - Participant IDs are aligned with that view's clustering_matrix
+
+${AIREADI_DATA_PATH}/processed/outcome_matrix.parquet
+    - Compatibility alias for the default view only
 ```
 
 ### Module 2 → Module 3
 ```
 ${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/membership_matrix.parquet
     - Index: participant_id
-    - Columns: pi_1 .. pi_K (soft membership probabilities, sum to 1)
+    - Columns: pi_1 .. pi_K (base-fit soft membership probabilities, sum to 1)
+    - This is the primary membership artifact consumed by Module 3
+
+Optional debug sidecar:
+${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/membership_matrix_bootstrap_mean.parquet
+    - Bootstrap-averaged membership probabilities, kept only for diagnostics/debug
 
 ${AIREADI_DATA_PATH}/artifacts/module2/<view>/<experiment>/cluster_profiles.parquet
     - Cluster centroids back-projected to original feature space
@@ -303,7 +328,7 @@ ${AIREADI_DATA_PATH}/artifacts/module2/experiment_comparison.csv
 ${AIREADI_DATA_PATH}/artifacts/module2/selection_summary.csv
     - Selection-rule evaluation across candidates (viability, cluster balance, final status)
 ${AIREADI_DATA_PATH}/artifacts/module2/selected/<slot>/selection_manifest.json
-    - Lightweight promotion manifest pointing to the selected source run
+    - Lightweight promotion manifest pointing to the selected source run and its aligned outcome matrix
 ${AIREADI_DATA_PATH}/artifacts/module2/selected/<slot>/shap/shap_summary.parquet
 ${AIREADI_DATA_PATH}/artifacts/module2/selected/<slot>/shap/shap_report.json
 ${AIREADI_DATA_PATH}/artifacts/module2/selected/<slot>/shap/base_cluster_assignments.parquet
@@ -315,10 +340,34 @@ ${AIREADI_DATA_PATH}/artifacts/module2/selection_summary.json
 
 ### Module 3 → Module 4
 ```
-Module 3 and Module 4 are currently stubs.
-- `module3_bayesian/pipeline.py` exists but raises `NotImplementedError`
+${AIREADI_DATA_PATH}/artifacts/module3/<view>/<experiment>/
+${AIREADI_DATA_PATH}/artifacts/module3/selected/<slot>/
+    - `analysis_dataset.parquet`
+        Participant-level merged analysis matrix with:
+        glycemic_cv, time_below_70, optional time_below_54,
+        hba1c, diabetes_stage, stable/unstable flags,
+        pi_1..pi_K, top_cluster, max_membership, membership_margin
+    - `diagnostics_table.parquet`
+        Long-form cohort and input diagnostics table, including continuous outcome summaries
+    - `participant_predictions.parquet`
+        Participant-level posterior mean and interval for either:
+        p(stable) in threshold mode, or expected glycemic_cv / time_below_70 in continuous mode
+    - `cluster_stage_predictions.parquet`
+        Predicted pure-cluster profiles by diabetes stage at mean hba1c
+        for the active Module 3 estimands
+    - `model_summary.parquet`
+        Bayesian coefficient summary table
+    - `sampling_diagnostics.json`
+        Divergences, R-hat, effective sample size, pass/fail flag
+    - `posterior_predictive_summary.json`
+        Observed vs posterior-predictive outcome summary for the active model
+    - `inference_data.nc`
+        Full ArviZ inference object for reproducibility
+    - `module3_run_summary.json`
+        Source selection, model estimands, reference levels, artifact paths
+
+Module 4 remains a stub.
 - `module4_reporting/pipeline.py` exists but raises `NotImplementedError`
-- No Module 3 or Module 4 artifacts are produced yet
 ```
 
 ---
@@ -342,7 +391,7 @@ module1:
     save_view_raw_matrices: true
     save_common_raw_matrix: false
   clustering_views:
-    cohort_policy: "common"
+    cohort_policy: "view_specific"
     default_view: "wearable_environment"
     views:
       wearable:
@@ -432,15 +481,16 @@ module2:
     view_priority: ["wearable_environment", "environment", "wearable"]
 
 module3:
-  # Reserved for future implementation; current pipeline is a stub
-  primary_model: "threshold"
+  primary_model: "continuous_dual"
   severity_covariates: ["hba1c", "diabetes_stage"]
   # hba1c is modeled as a continuous covariate (%), not stratified
   # diabetes_stage: 4-level categorical (0=no diabetes, 1=prediabetes,
   #                 2=oral/non-insulin injectable, 3=insulin-controlled)
   primary_outcome: "glycemic_cv"
-  cv_clinical_threshold: 36.0        # CV < 36% = good glycemic stability
-  run_comparison_models: true        # Runs two-stage and joint alongside primary
+  secondary_outcomes: ["time_below_70"]
+  cv_clinical_threshold: 36.0        # retained for diagnostics and stable/unstable summaries
+  proportion_epsilon: 0.0001         # clips 0/1 proportions before logit transform
+  run_comparison_models: false       # comparison-model sweep not implemented
   sampling:
     draws: 2000
     tune: 1000
@@ -491,7 +541,7 @@ The current `.gitignore` is broader than the abbreviated list above and excludes
 | Config parsing | `pyyaml` |
 | Test runner | `pytest` |
 
-`environment.yml` currently also pins `umap-learn`, `lightgbm`, `xgboost`, `pymc`, `arviz`, `statsmodels`, and `seaborn` for planned downstream work, but those libraries are not used by the currently implemented pipelines.
+`environment.yml` currently also pins `umap-learn`, `lightgbm`, `xgboost`, `pymc`, `arviz`, `statsmodels`, and `seaborn`. Module 3 now uses `pymc` and `arviz`; the others remain reserved for downstream work.
 
 ---
 
@@ -514,16 +564,18 @@ Current behavior:
 | Bootstrap resamples (Module 2) | `joblib.Parallel` across B iterations |
 | SHAP computation per resample | Runs inside each bootstrap worker |
 | GMM grid search | Current implementation is serial within a run |
-| Module 3 sampling | Not implemented yet |
+| Module 3 sampling | PyMC NUTS sampling (serial in current implementation) |
 
 ---
 
 ## Testing Strategy
 
 Current test coverage is limited:
-- `tests/test_module1.py` is a placeholder and currently skips
+- `tests/test_module1.py` covers CGM summary outputs and view-specific assembly behavior
 - `tests/test_module2.py` covers PCA behavior and artifact writing
-- `tests/test_module3.py` is an expected-failure stub because Module 3 is not implemented
+- `tests/test_module3.py` covers Module 3 input validation and synthetic direct-mode execution when `pymc` is available
+- `tests/test_module3_plot.py` covers the CV bin plotting helper
+- `tests/test_parquet_utils.py` covers parquet compatibility error messaging
 - No committed fixture dataset exists in `tests/fixtures/`
 
 ---
@@ -538,11 +590,12 @@ python -m module2_clustering.pipeline --config config/config.yaml
 python -m module2_clustering.experiment_runner --config config/config.yaml
 python -m module2_clustering.promote_solution --config config/config.yaml --slot primary --view wearable_environment --experiment stability_v1
 python -m module2_clustering.run_shap --config config/config.yaml --slot primary
-python -m module3_bayesian.pipeline   --config config/config.yaml
+python -m module3_bayesian.pipeline   --config config/config.yaml --slot primary
+python -m module3_bayesian.pipeline   --config config/config.yaml --view wearable_environment --experiment stability_v1
 python -m module4_reporting.pipeline  --config config/config.yaml
 ```
 
-Implemented pipelines validate expected input artifacts before running. Module 3 and Module 4 currently stop with `NotImplementedError` after config-path validation.
+Implemented pipelines validate expected input artifacts before running. Module 4 still stops with `NotImplementedError`.
 
 ---
 
@@ -554,10 +607,14 @@ The diabetes staging variable configured for future Module 3 work has four categ
 - `2` = Diabetes, oral or non-insulin injectable medications
 - `3` = Diabetes, insulin-controlled
 
-For planned Module 3 work, baseline severity adjustment is intended to use:
+Current Module 3 uses:
 - Continuous `hba1c`
 - `diabetes_stage`
+- Module 2 soft membership probabilities as K-1 predictors versus a reference cluster
+- Either:
+  - A Bayesian logistic model for `P(glycemic_cv < 36 | hba1c, diabetes_stage, cluster_probability_profile)`, or
+  - A Bayesian continuous dual-outcome model for
+    `E(glycemic_cv | hba1c, diabetes_stage, cluster_probability_profile)` and
+    `E(time_below_70 | hba1c, diabetes_stage, cluster_probability_profile)`
 
 `site` is not part of the planned covariate set, and `hba1c` is intended to remain continuous rather than being binned into `hba1c_stratum`.
-
-Those covariates are described in `config.yaml`, but the actual Bayesian model code has not been implemented yet.

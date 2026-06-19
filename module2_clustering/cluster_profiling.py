@@ -20,6 +20,7 @@ def build_membership_matrix(
     participant_ids: Iterable,
     membership_probs: np.ndarray,
     artifacts_path: Path | None = None,
+    output_name: str = "membership_matrix.parquet",
 ) -> pd.DataFrame:
     """Return participant_id-indexed membership matrix."""
 
@@ -38,7 +39,7 @@ def build_membership_matrix(
 
     if artifacts_path:
         artifacts_path.mkdir(parents=True, exist_ok=True)
-        membership_df.to_parquet(artifacts_path / "membership_matrix.parquet")
+        membership_df.to_parquet(artifacts_path / output_name)
 
     return membership_df
 

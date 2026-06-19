@@ -19,7 +19,7 @@ module1:
     save_view_raw_matrices: true
     save_common_raw_matrix: false
   clustering_views:
-    cohort_policy: "common"         # Options: common
+    cohort_policy: "view_specific"  # Options: view_specific | common
     default_view: "wearable_environment"
     views:
       wearable:
@@ -110,11 +110,15 @@ module2:
     view_priority: ["wearable_environment", "environment", "wearable"]
 
 module3:
-  primary_model: "threshold"
+  primary_model: "continuous_dual"
   severity_covariates: ["hba1c", "diabetes_stage"]
+  # Module 3 models expected glycemic variability and low-glucose burden
+  # while keeping the full Module 2 soft cluster profile as predictors.
   primary_outcome: "glycemic_cv"
-  cv_clinical_threshold: 36.0
-  run_comparison_models: true
+  secondary_outcomes: ["time_below_70"]
+  cv_clinical_threshold: 36.0        # retained for diagnostics / stable-vs-unstable summaries
+  proportion_epsilon: 0.0001         # clips 0/1 proportions before the logit transform
+  run_comparison_models: false       # comparison-model sweep not implemented; fail fast if set true
   sampling:
     draws: 2000
     tune: 1000

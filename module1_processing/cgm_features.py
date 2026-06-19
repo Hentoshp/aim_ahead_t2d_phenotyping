@@ -16,6 +16,29 @@ from .common import (
 CGM_PATH_TEMPLATE = "wearable_blood_glucose/continuous_glucose_monitoring/dexcom_g6/{pid}/{pid}_DEX.json"
 
 
+def summarize_cgm_series(glucose: pd.DataFrame) -> dict[str, float | None]:
+    if glucose.empty:
+        return {
+            "glycemic_cv": None,
+            "mean_glucose": None,
+            "time_in_range": None,
+            "time_below_70": None,
+            "time_below_54": None,
+        }
+
+    mean_glu = glucose["value"].mean()
+    std_glu = glucose["value"].std(ddof=0)
+    glycemic_cv = float(std_glu / mean_glu * 100) if mean_glu and not pd.isna(mean_glu) else None
+
+    return {
+        "glycemic_cv": glycemic_cv,
+        "mean_glucose": float(mean_glu) if not pd.isna(mean_glu) else None,
+        "time_in_range": float(((glucose["value"] >= 70) & (glucose["value"] <= 180)).mean()),
+        "time_below_70": float((glucose["value"] < 70).mean()),
+        "time_below_54": float((glucose["value"] < 54).mean()),
+    }
+
+
 def build_cgm_features(cfg_path: Path) -> None:
     cfg, base = load_config(cfg_path)
     thresholds = cfg["module1"]["qc_thresholds"]["cgm"]
@@ -46,19 +69,27 @@ def build_cgm_features(cfg_path: Path) -> None:
             exclusion_reasons["<min_wear_days"] = exclusion_reasons.get("<min_wear_days", 0) + 1
             continue
 
-        mean_glu = glucose["value"].mean()
-        std_glu = glucose["value"].std(ddof=0)
-        glycemic_cv = float(std_glu / mean_glu * 100) if mean_glu and not pd.isna(mean_glu) else None
-        tir = float(((glucose["value"] >= 70) & (glucose["value"] <= 180)).mean()) if not glucose.empty else None
+        cgm_summary = summarize_cgm_series(glucose)
 
         rows.append(pd.DataFrame({
             "person_id": [pid],
-            "glycemic_cv": [glycemic_cv],
-            "mean_glucose": [mean_glu],
-            "time_in_range": [tir],
+            "glycemic_cv": [cgm_summary["glycemic_cv"]],
+            "mean_glucose": [cgm_summary["mean_glucose"]],
+            "time_in_range": [cgm_summary["time_in_range"]],
+            "time_below_70": [cgm_summary["time_below_70"]],
+            "time_below_54": [cgm_summary["time_below_54"]],
         }))
 
-    features = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=["person_id", "glycemic_cv", "mean_glucose", "time_in_range"])
+    features = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(
+        columns=[
+            "person_id",
+            "glycemic_cv",
+            "mean_glucose",
+            "time_in_range",
+            "time_below_70",
+            "time_below_54",
+        ]
+    )
     if features.empty:
         raise ValueError("CGM features empty after applying QC; check inputs and thresholds")
     features = features.set_index("person_id")
